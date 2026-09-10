@@ -1,0 +1,21 @@
+services:
+  recipebot:
+    image: ghcr.io/mrredsun/telegram-recipe-bot:${IMAGE_TAG:?Set IMAGE_TAG to an immutable sha-* tag}
+    env_file: .env
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp/recipebot:size=512m,mode=0700,uid=10001,gid=10001
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 256
+    stop_grace_period: 20s
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
