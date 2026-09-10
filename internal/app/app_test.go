@@ -43,7 +43,7 @@ func (fakeExtract) Extract(context.Context, string, string) (youtube.Evidence, e
 type fakeInfer struct{}
 
 func (fakeInfer) Infer(context.Context, youtube.Evidence) (recipe.Recipe, error) {
-	return recipe.Recipe{Title: "Soup", Ingredients: []recipe.Ingredient{{Item: "water", Confidence: "high"}}, Steps: []string{"Heat"}, Confidence: "high"}, nil
+	return recipe.Recipe{Title: "Soup", Ingredients: []recipe.Ingredient{{Item: "water", Confidence: "high"}}, Steps: []recipe.Step{{Instruction: "Heat", Confidence: "high"}}, Confidence: "high"}, nil
 }
 func TestEndToEndMessage(t *testing.T) {
 	tg := &fakeTG{edits: make(chan string, 1)}
