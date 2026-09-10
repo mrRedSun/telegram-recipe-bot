@@ -15,6 +15,7 @@ clearly distinguishing what the source showed from what the model inferred.
    wildcard mode.
 3. Download one public, non-live video of at most 240 seconds and 100 MiB by
    default. Extract metadata, available English/Ukrainian/Russian subtitles,
+   up to five uploader-authored comments from a bounded top-comment sample,
    OCR, and at most 12 resized frames.
 4. Use Z.AI's OpenAI-compatible Chat Completions endpoint. `glm-5.3-flash`
    receives the textual evidence and frames; text-only `glm-5.3` receives the
@@ -56,11 +57,21 @@ validates this contract before sending anything to Telegram.
 
 ## Accuracy policy
 
-Evidence priority is explicit captions/onscreen text, observable action, source
-description, then culinary inference. Unsupported exact values become "not
+Evidence priority is explicit source description and uploader-authored comments
+(pinned first), explicit captions/onscreen text, observable action, then culinary
+inference. General viewer comments are never model evidence. Unsupported exact values become "not
 shown", "as needed", or an honest range. Low-confidence conclusions are marked
 and explained. Raw protein, allergens, cross-contamination, and doneness risks
 are surfaced when relevant.
+
+Comment collection is best effort and independent of the media download. It
+sorts by YouTube's top ordering, inspects at most 50 comments (40 parent comments
+and 10 replies), selects only entries explicitly marked by YouTube as authored
+by the uploader, deduplicates them, places pinned entries first, and limits the
+result to five comments and 6,000 characters. Disabled comments, rate limits,
+the 45-second comment-stage deadline, or comment extraction failures do not fail
+the recipe job. A deeply buried
+uploader comment can therefore be missed by design.
 
 ## Capacity and failure model
 
@@ -76,4 +87,3 @@ Z.AI documents `glm-5.3` as text-only and `glm-5.3-flash` as multimodal. The
 default is therefore `glm-5.3-flash`, the only member of the requested 5.3
 family that can inspect frames. Plain `glm-5.3` remains supported for users who
 prefer it, but its accuracy depends heavily on captions and OCR.
-
