@@ -138,7 +138,15 @@ func (e Extractor) Extract(ctx context.Context, rawURL, dir string) (Evidence, e
 		return ev, err
 	}
 	framePattern := filepath.Join(framesDir, "frame-%03d.jpg")
-	cmd := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-loglevel", "error", "-i", media, "-vf", "fps=1/15,scale=768:-2:force_original_aspect_ratio=decrease", "-frames:v", "12", "-q:v", "5", framePattern)
+	interval := info.Duration / 12
+	if interval < 2 {
+		interval = 2
+	}
+	if interval > 15 {
+		interval = 15
+	}
+	filter := fmt.Sprintf("fps=1/%.3f,scale=768:-2:force_original_aspect_ratio=decrease", interval)
+	cmd := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-loglevel", "error", "-i", media, "-vf", filter, "-frames:v", "12", "-q:v", "5", framePattern)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return ev, fmt.Errorf("frame extraction failed: %s", bounded(out))
 	}

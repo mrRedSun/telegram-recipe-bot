@@ -3,6 +3,8 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -64,6 +66,12 @@ func Load() (Config, error) {
 	if c.GLMAPIKey == "" {
 		return Config{}, errors.New("GLM_API_KEY is required")
 	}
+	if err := secureBase("TELEGRAM_API_BASE", c.TelegramAPIBase); err != nil {
+		return Config{}, err
+	}
+	if err := secureBase("GLM_API_BASE", c.GLMAPIBase); err != nil {
+		return Config{}, err
+	}
 	if len(c.AllowedUsers) == 0 {
 		return Config{}, errors.New("TELEGRAM_ALLOWED_USER_IDS must contain at least one numeric user ID")
 	}
@@ -85,6 +93,22 @@ func Load() (Config, error) {
 		return Config{}, errors.New("GLM_REASONING_EFFORT must be low, high, or max")
 	}
 	return c, nil
+}
+
+func secureBase(name, raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Hostname() == "" || u.User != nil {
+		return fmt.Errorf("%s must be a valid URL without credentials", name)
+	}
+	host := u.Hostname()
+	loopback := host == "localhost"
+	if ip := net.ParseIP(host); ip != nil {
+		loopback = ip.IsLoopback()
+	}
+	if u.Scheme != "https" && !loopback {
+		return fmt.Errorf("%s must use HTTPS (HTTP is allowed only for loopback tests)", name)
+	}
+	return nil
 }
 
 func value(key, fallback string) string {

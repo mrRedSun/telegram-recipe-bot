@@ -26,3 +26,13 @@ func TestLoadRejectsOpenAccess(t *testing.T) {
 		t.Fatal("expected allowlist error")
 	}
 }
+
+func TestLoadRejectsInsecureAPIBase(t *testing.T) {
+	t.Setenv("TELEGRAM_BOT_TOKEN", "bot-token")
+	t.Setenv("GLM_API_KEY", "glm-key")
+	t.Setenv("TELEGRAM_ALLOWED_USER_IDS", "123")
+	t.Setenv("GLM_API_BASE", "http://glm.example.test/v4")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected insecure API base error")
+	}
+}
