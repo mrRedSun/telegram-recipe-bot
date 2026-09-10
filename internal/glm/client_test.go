@@ -22,7 +22,7 @@ func TestInfer(t *testing.T) {
 		}
 		requestBody = string(body)
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"choices":[{"message":{"content":"{\"title\":\"Toast\",\"summary\":\"\",\"servings\":\"1\",\"time\":\"\",\"ingredients\":[{\"quantity\":\"1\",\"item\":\"bread\",\"confidence\":\"high\"}],\"steps\":[\"Toast it\"],\"assumptions\":[],\"warnings\":[],\"confidence\":\"high\"}"}}]}`)
+		fmt.Fprint(w, `{"choices":[{"message":{"content":"{\"title\":\"Toast\",\"summary\":\"\",\"yield\":\"1 serving\",\"times\":{\"prep\":\"\",\"cook\":\"\",\"total\":\"\"},\"ingredients\":[{\"amount\":\"1\",\"unit\":\"slice\",\"item\":\"bread\",\"confidence\":\"high\"}],\"equipment\":[],\"steps\":[{\"instruction\":\"Toast it\",\"confidence\":\"high\"}],\"assumptions\":[],\"warnings\":[],\"confidence\":\"high\"}"}}]}`)
 	}))
 	defer s.Close()
 	c := New(s.URL, "secret", "glm-5.3", "low", false)
@@ -40,5 +40,13 @@ func TestInfer(t *testing.T) {
 func TestExtractJSON(t *testing.T) {
 	if got := extractJSON("```json\n{\"a\":1}\n```"); !strings.HasPrefix(got, "{") {
 		t.Fatal(got)
+	}
+}
+
+func TestSystemPromptDefinesStructuredRecipe(t *testing.T) {
+	for _, field := range []string{`"yield"`, `"times"`, `"amount"`, `"unit"`, `"equipment"`, `"duration"`, `"temperature"`} {
+		if !strings.Contains(systemPrompt, field) {
+			t.Fatalf("system prompt omitted %s", field)
+		}
 	}
 }

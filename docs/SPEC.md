@@ -49,11 +49,23 @@ clearly distinguishing what the source showed from what the model inferred.
 
 ## Recipe contract
 
-The model returns JSON containing `title`, `summary`, `servings`, `time`,
-`ingredients[]`, `steps[]`, `assumptions[]`, `warnings[]`, and overall
-`confidence`. Each ingredient contains `quantity`, `item`, optional `notes`, and
-`confidence`. Confidence is exactly `high`, `medium`, or `low`. The application
-validates this contract before sending anything to Telegram.
+The model returns JSON containing `title`, `summary`, `yield`, structured
+`times` (`prep`, `cook`, and `total`), `ingredients[]`, `equipment[]`,
+structured `steps[]`, `assumptions[]`, `warnings[]`, and overall `confidence`.
+Each ingredient separates `amount`, `unit`, `item`, and `preparation`; each step
+separates its `instruction`, optional `duration`, optional `temperature`, and
+confidence. Confidence is exactly `high`, `medium`, or `low` at ingredient,
+step, and recipe level. The application validates the contract and entry counts
+before rendering it.
+
+Telegram output uses supported HTML message entities: bold and underlined
+headings, italic metadata, visible safety blockquotes, and an expandable
+uncertainty blockquote. Telegram has no native table entity, so overview and
+ingredient tables use escaped, fixed-width `<pre>` blocks of about 38
+monospaced characters per row for practical mobile viewing. Model output never
+supplies markup, and
+all dynamic content is HTML-escaped. The complete message stays below
+Telegram's 4,096-character limit.
 
 ## Accuracy policy
 
