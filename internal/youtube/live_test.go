@@ -23,5 +23,5 @@ func TestLiveExtraction(t *testing.T) {
 	if ev.Title == "" || ev.Duration <= 0 || len(ev.Frames) == 0 {
 		t.Fatalf("incomplete evidence: title=%q duration=%v frames=%d", ev.Title, ev.Duration, len(ev.Frames))
 	}
-	t.Logf("extracted title=%q duration=%.0fs frames=%d transcript_bytes=%d ocr_bytes=%d", ev.Title, ev.Duration, len(ev.Frames), len(ev.Transcript), len(ev.OCR))
+	t.Logf("extracted title=%q duration=%.0fs frames=%d description_bytes=%d author_comment_bytes=%d transcript_bytes=%d ocr_bytes=%d", ev.Title, ev.Duration, len(ev.Frames), len(ev.Description), len(ev.AuthorComments), len(ev.Transcript), len(ev.OCR))
 }

@@ -12,7 +12,8 @@ trust boundaries.
 - Authentication: numeric Telegram sender allowlist, required at startup.
 - SSRF/input injection: exact YouTube hostname and video-ID parsing; no arbitrary
   URLs reach `yt-dlp`; commands use argument arrays, never a shell.
-- Prompt injection: all source text is explicitly untrusted evidence; the fixed
+- Prompt injection: all source text, including uploader comments, is explicitly
+  untrusted evidence; the fixed
   system prompt restricts output; JSON is parsed and semantically validated.
 - Resource exhaustion: one video, no playlists/live media, duration/size limits,
   bounded queue/workers, timeouts, response limits, tmpfs, PID limit.
@@ -26,7 +27,7 @@ trust boundaries.
 ## Abuse cases considered
 
 Redirects and lookalike domains are rejected before download. Crafted titles,
-subtitles, OCR, and frame text cannot alter application configuration or invoke
+descriptions, uploader comments, subtitles, OCR, and frame text cannot alter application configuration or invoke
 tools. Large, long, live, and playlist inputs are rejected. Repeated requests
 cannot create unbounded goroutines or queues. Telegram HTML is escaped. GLM and
 Telegram response bodies are bounded before logging.
@@ -37,6 +38,9 @@ Telegram response bodies are bounded before logging.
   periodic reviewed updates.
 - Captions and sparse frames can omit ingredients or timing. Even multimodal
   output is probabilistic and must not be treated as authoritative.
+- The bounded top-comment sample can miss a buried uploader reply. Comment
+  extraction can also be unavailable or rate-limited; it fails open to the
+  remaining evidence. Viewer comments are excluded.
 - Tesseract ships only English, Ukrainian, and Russian language data.
 - Environment variables remain visible to privileged LXC/Docker administrators.
 - Third parties receive URLs/content according to their own policies.
@@ -56,4 +60,3 @@ Telegram response bodies are bounded before logging.
   values are deliberately marked uncertain.
 - What survives a restart? Nothing except the immutable image and external
   service configuration; queued work is intentionally disposable.
-

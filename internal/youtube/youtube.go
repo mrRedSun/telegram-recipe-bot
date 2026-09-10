@@ -20,13 +20,14 @@ import (
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{6,20}$`)
 
 type Evidence struct {
-	SourceURL   string
-	Title       string
-	Description string
-	Duration    float64
-	Transcript  string
-	OCR         string
-	Frames      []string
+	SourceURL      string
+	Title          string
+	Description    string
+	AuthorComments string
+	Duration       float64
+	Transcript     string
+	OCR            string
+	Frames         []string
 }
 type Extractor struct {
 	MaxDuration    time.Duration
@@ -98,6 +99,13 @@ func (e Extractor) Extract(ctx context.Context, rawURL, dir string) (Evidence, e
 	// translated-caption rate limit cannot discard a successfully downloaded video.
 	subArgs := []string{"--no-playlist", "--no-progress", "--socket-timeout", "20", "--retries", "1", "--skip-download", "--write-subs", "--write-auto-subs", "--sub-langs", "en,uk,ru,en-orig,uk-orig,ru-orig", "--sub-format", "vtt", "--convert-subs", "vtt", "--js-runtimes", "deno", "-o", output, canonical}
 	_, _ = exec.CommandContext(ctx, "yt-dlp", subArgs...).CombinedOutput()
+	// Comments are optional evidence. Keep this fetch separate so disabled
+	// comments, rate limits, or extractor changes do not discard the video.
+	commentOutput := filepath.Join(dir, "comments.%(ext)s")
+	commentArgs := []string{"--no-playlist", "--no-progress", "--socket-timeout", "20", "--retries", "1", "--skip-download", "--write-info-json", "--write-comments", "--extractor-args", "youtube:comment_sort=top;max_comments=50,40,10,2,2", "--js-runtimes", "deno", "-o", commentOutput, canonical}
+	commentCtx, cancelComments := context.WithTimeout(ctx, 45*time.Second)
+	_, _ = exec.CommandContext(commentCtx, "yt-dlp", commentArgs...).CombinedOutput()
+	cancelComments()
 	ev := Evidence{SourceURL: canonical}
 	infos, _ := filepath.Glob(filepath.Join(dir, "source.info.json"))
 	if len(infos) == 0 {
@@ -118,6 +126,7 @@ func (e Extractor) Extract(ctx context.Context, rawURL, dir string) (Evidence, e
 	ev.Title = info.Title
 	ev.Description = clip(info.Description, 6000)
 	ev.Duration = info.Duration
+	ev.AuthorComments, _ = readAuthorComments(filepath.Join(dir, "comments.info.json"))
 	if info.Duration > e.MaxDuration.Seconds()+1 {
 		return ev, &UnsupportedError{Message: fmt.Sprintf("That video is %.0f seconds; the limit is %.0f seconds.", info.Duration, e.MaxDuration.Seconds())}
 	}
@@ -171,6 +180,52 @@ func findMedia(dir string) (string, error) {
 		return p, nil
 	}
 	return "", errors.New("yt-dlp produced no media file")
+}
+func readAuthorComments(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	var info struct {
+		Comments []struct {
+			Text             string `json:"text"`
+			AuthorIsUploader bool   `json:"author_is_uploader"`
+			IsPinned         bool   `json:"is_pinned"`
+		} `json:"comments"`
+	}
+	if err := json.Unmarshal(b, &info); err != nil {
+		return "", err
+	}
+	var pinned, other []string
+	seen := map[string]bool{}
+	for _, comment := range info.Comments {
+		if !comment.AuthorIsUploader {
+			continue
+		}
+		text := strings.TrimSpace(comment.Text)
+		if text == "" || seen[text] {
+			continue
+		}
+		seen[text] = true
+		if comment.IsPinned {
+			pinned = append(pinned, text)
+		} else {
+			other = append(other, text)
+		}
+	}
+	comments := append(pinned, other...)
+	if len(comments) > 5 {
+		comments = comments[:5]
+	}
+	var sections []string
+	for i, text := range comments {
+		label := "Author comment"
+		if i < len(pinned) {
+			label = "Pinned author comment"
+		}
+		sections = append(sections, "["+label+"]\n"+text)
+	}
+	return clip(strings.Join(sections, "\n\n"), 6000), nil
 }
 func readVTT(dir string) string {
 	files, _ := filepath.Glob(filepath.Join(dir, "*.vtt"))
