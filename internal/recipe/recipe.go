@@ -52,53 +52,94 @@ func confidence(v string) bool { return v == "high" || v == "medium" || v == "lo
 
 func RenderHTML(r Recipe) string {
 	var b strings.Builder
-	f := func(s string) string { return html.EscapeString(strings.TrimSpace(s)) }
-	fmt.Fprintf(&b, "<b>%s</b>\n", f(r.Title))
-	if r.Summary != "" {
-		fmt.Fprintf(&b, "%s\n", f(r.Summary))
+	truncated := false
+	f := func(s string, n int) string {
+		s = strings.TrimSpace(s)
+		if len([]rune(s)) > n {
+			truncated = true
+		}
+		return html.EscapeString(limit(s, n))
+	}
+	add := func(line string) bool {
+		if b.Len()+len(line) > 3800 {
+			truncated = true
+			return false
+		}
+		b.WriteString(line)
+		return true
+	}
+	finish := func() string {
+		if truncated {
+			b.WriteString("\n<i>Recipe shortened to fit Telegram.</i>")
+		}
+		return b.String()
+	}
+	add("<b>" + f(r.Title, 160) + "</b>\n")
+	if r.Summary != "" && !add(f(r.Summary, 600)+"\n") {
+		return finish()
 	}
 	meta := []string{}
 	if r.Servings != "" {
-		meta = append(meta, "Servings: "+f(r.Servings))
+		meta = append(meta, "Servings: "+f(r.Servings, 80))
 	}
 	if r.Time != "" {
-		meta = append(meta, "Time: "+f(r.Time))
+		meta = append(meta, "Time: "+f(r.Time, 80))
 	}
-	meta = append(meta, "Confidence: "+f(r.Confidence))
-	b.WriteString(strings.Join(meta, " · ") + "\n\n<b>Ingredients</b>\n")
+	meta = append(meta, "Confidence: "+f(r.Confidence, 20))
+	if !add(strings.Join(meta, " · ") + "\n\n<b>Ingredients</b>\n") {
+		return finish()
+	}
 	for _, in := range r.Ingredients {
 		line := "• "
 		if in.Quantity != "" {
-			line += f(in.Quantity) + " "
+			line += f(in.Quantity, 80) + " "
 		}
-		line += f(in.Item)
+		line += f(in.Item, 180)
 		if in.Notes != "" {
-			line += " (" + f(in.Notes) + ")"
+			line += " (" + f(in.Notes, 180) + ")"
 		}
 		if in.Confidence == "low" {
 			line += " ⚠️"
 		}
-		b.WriteString(line + "\n")
+		if !add(line + "\n") {
+			return finish()
+		}
 	}
-	b.WriteString("\n<b>Method</b>\n")
+	if !add("\n<b>Method</b>\n") {
+		return finish()
+	}
 	for i, step := range r.Steps {
-		fmt.Fprintf(&b, "%d. %s\n", i+1, f(step))
+		if !add(fmt.Sprintf("%d. %s\n", i+1, f(step, 500))) {
+			return finish()
+		}
 	}
 	if len(r.Assumptions) > 0 {
-		b.WriteString("\n<b>Uncertain / inferred</b>\n")
+		if !add("\n<b>Uncertain / inferred</b>\n") {
+			return finish()
+		}
 		for _, v := range r.Assumptions {
-			b.WriteString("• " + f(v) + "\n")
+			if !add("• " + f(v, 400) + "\n") {
+				return finish()
+			}
 		}
 	}
 	if len(r.Warnings) > 0 {
-		b.WriteString("\n<b>Safety</b>\n")
+		if !add("\n<b>Safety</b>\n") {
+			return finish()
+		}
 		for _, v := range r.Warnings {
-			b.WriteString("• " + f(v) + "\n")
+			if !add("• " + f(v, 400) + "\n") {
+				return finish()
+			}
 		}
 	}
-	out := b.String()
-	if len(out) > 4000 {
-		out = out[:3950] + "\n\n<i>Recipe shortened to fit Telegram.</i>"
+	return finish()
+}
+
+func limit(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
 	}
-	return out
+	return string(r[:n]) + "…"
 }
