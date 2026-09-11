@@ -73,7 +73,7 @@ func (c *Client) Send(ctx context.Context, chatID int64, text string) (Message, 
 	return c.message(ctx, "sendMessage", map[string]any{"chat_id": chatID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": true})
 }
 func (c *Client) Edit(ctx context.Context, chatID, messageID int64, text string) error {
-	_, err := c.message(ctx, "editMessageText", map[string]any{"chat_id": chatID, "message_id": messageID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": true})
+	_, err := c.message(ctx, "editMessageText", map[string]any{"chat_id": chatID, "message_id": messageID, "rich_message": map[string]any{"html": text, "skip_entity_detection": true}})
 	return err
 }
 func (c *Client) message(ctx context.Context, method string, payload map[string]any) (Message, error) {

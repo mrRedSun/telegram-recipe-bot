@@ -2,6 +2,10 @@
 
 ## First deployment
 
+The hosted `https://api.telegram.org` endpoint supports the required Bot API
+10.3 Rich Messages. A custom or self-hosted `TELEGRAM_API_BASE` must run Bot API
+10.3 or newer; older servers cannot render the bot's native tables.
+
 1. Copy `.env.example` to `.env`, set an immutable `IMAGE_TAG`, BotFather token,
    permitted numeric Telegram IDs, and Z.AI API key; then `chmod 600 .env`.
 2. `docker compose config --quiet` and `docker compose pull`.
@@ -29,4 +33,3 @@ visual evidence, quota/auth errors, and Telegram token reuse by another poller.
 Rotate at BotFather or Z.AI, update the mode-0600 `.env`, then recreate the
 container. Never paste secrets into Compose YAML, Git, issues, or CI variables;
 CI does not need runtime credentials.
-

@@ -18,7 +18,7 @@ plain model with title, description, uploader-authored comments, captions, and O
 Telegram long poll -> sender allowlist -> bounded queue
   -> exact YouTube URL policy -> yt-dlp (one bounded video)
   -> captions + metadata + bounded uploader comments + Tesseract OCR + 12 FFmpeg frames
-  -> structured GLM JSON -> semantic validation -> rich HTML + compact tables
+  -> structured GLM JSON -> validation -> native Telegram Rich Message tables
   -> unconditional temporary-directory cleanup
 ```
 

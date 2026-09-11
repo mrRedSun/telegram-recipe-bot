@@ -7,7 +7,9 @@ import (
 	"strings"
 )
 
-const messageBudget = 3800
+// Rich messages allow 32,768 UTF-8 characters. A byte budget below that limit
+// is deliberately conservative and also covers markup overhead.
+const richMessageBudget = 30000
 
 type Times struct {
 	Prep  string `json:"prep"`
@@ -83,165 +85,223 @@ func (r Recipe) Validate() error {
 
 func confidence(v string) bool { return v == "high" || v == "medium" || v == "low" }
 
-// RenderHTML uses only Telegram Bot API-supported HTML. Telegram has no table
-// entity, so compact tables are represented by escaped monospaced <pre> blocks.
-func RenderHTML(r Recipe) string {
+// RenderRichHTML returns Telegram Bot API Rich HTML, not legacy sendMessage
+// HTML. Tables, headings, lists, details, dividers, and footers are native rich
+// message blocks parsed by editMessageText's rich_message field.
+func RenderRichHTML(r Recipe) string {
 	var b strings.Builder
 	truncated := false
-	escape := func(s string, n int) string {
-		s = strings.TrimSpace(s)
-		if len([]rune(s)) > n {
-			truncated = true
-		}
-		return html.EscapeString(limit(s, n))
-	}
-	add := func(fragment string) bool {
-		if b.Len()+len(fragment) > messageBudget {
+	add := func(block string) bool {
+		if b.Len()+len(block) > richMessageBudget {
 			truncated = true
 			return false
 		}
-		b.WriteString(fragment)
+		b.WriteString(block)
 		return true
+	}
+	field := func(s string, maxRunes int) string {
+		value, wasTruncated := escapedField(s, maxRunes)
+		truncated = truncated || wasTruncated
+		return value
 	}
 	finish := func() string {
 		if truncated {
-			b.WriteString("\n<i>Recipe shortened to fit Telegram.</i>")
+			b.WriteString("<footer>Recipe shortened to fit Telegram.</footer>")
 		}
 		return b.String()
 	}
 
-	add("🍳 <b>" + escape(r.Title, 160) + "</b>\n")
-	if r.Summary != "" && !add("<i>"+escape(r.Summary, 500)+"</i>\n") {
+	add("<h2>🍳 " + field(r.Title, 180) + "</h2>")
+	if r.Summary != "" && !add("<p><i>"+field(r.Summary, 600)+"</i></p>") {
 		return finish()
 	}
-	if !add("\n<pre>" + html.EscapeString(overviewTable(r)) + "</pre>\n") {
+	overview, shortened := overviewTableHTML(r)
+	truncated = truncated || shortened
+	if !add(overview) {
 		return finish()
 	}
 
 	if len(r.Warnings) > 0 {
-		warningText := boundedList(r.Warnings, 900)
-		if !add("\n<blockquote>⚠️ <b>Safety</b>\n" + html.EscapeString(warningText) + "</blockquote>\n") {
+		warnings, shortened := quotationHTML("⚠️ Safety", r.Warnings, 2500)
+		truncated = truncated || shortened
+		if !add(warnings) {
 			return finish()
 		}
 	}
+	add("<hr/>")
 
-	if !add("\n🧺 <b><u>Ingredients</u></b>\n<pre>" + html.EscapeString(ingredientTable(r.Ingredients)) + "</pre>\n") {
+	ingredients, shortened := ingredientTableHTML(r.Ingredients, 9000)
+	truncated = truncated || shortened
+	if !add(ingredients) {
 		return finish()
 	}
+
+	steps, shortened := stepsHTML(r.Steps, 9000)
+	truncated = truncated || shortened
+	if !add(steps) {
+		return finish()
+	}
+
 	if len(r.Equipment) > 0 {
-		if !add("\n🔧 <b><u>Equipment</u></b>\n") {
-			return finish()
-		}
-		for _, item := range r.Equipment {
-			if !add("• " + escape(item, 120) + "\n") {
-				return finish()
-			}
-		}
-	}
-
-	if !add("\n👩‍🍳 <b><u>Method</u></b>\n") {
-		return finish()
-	}
-	for i, step := range r.Steps {
-		line := fmt.Sprintf("<b>%d.</b> %s\n", i+1, escape(step.Instruction, 480))
-		var details []string
-		if step.Duration != "" {
-			details = append(details, "⏱ "+escape(step.Duration, 80))
-		}
-		if step.Temperature != "" {
-			details = append(details, "🌡 "+escape(step.Temperature, 80))
-		}
-		if step.Confidence != "high" {
-			details = append(details, confidenceLabel(step.Confidence))
-		}
-		if len(details) > 0 {
-			line += "   <i>" + strings.Join(details, " · ") + "</i>\n"
-		}
-		if !add(line) {
+		equipment, shortened := listSectionHTML("🔧 Equipment", r.Equipment, 3000)
+		truncated = truncated || shortened
+		if !add(equipment) {
 			return finish()
 		}
 	}
 
 	if len(r.Assumptions) > 0 {
-		assumptions := boundedList(r.Assumptions, 900)
-		if !add("\n<blockquote expandable>🔎 <b>Uncertain or inferred</b>\n" + html.EscapeString(assumptions) + "</blockquote>\n") {
+		assumptions, shortened := detailsHTML("🔎 Uncertain or inferred", r.Assumptions, 2800)
+		truncated = truncated || shortened
+		if !add(assumptions) {
 			return finish()
 		}
 	}
 	return finish()
 }
 
-func overviewTable(r Recipe) string {
+func overviewTableHTML(r Recipe) (string, bool) {
 	rows := [][2]string{
-		{"YIELD", valueOrUnknown(r.Yield)},
-		{"PREP", valueOrUnknown(r.Times.Prep)},
-		{"COOK", valueOrUnknown(r.Times.Cook)},
-		{"TOTAL", valueOrUnknown(r.Times.Total)},
-		{"CONFIDENCE", strings.ToUpper(r.Confidence) + " " + confidenceMark(r.Confidence)},
+		{"Yield", valueOrUnknown(r.Yield)},
+		{"Prep", valueOrUnknown(r.Times.Prep)},
+		{"Cook", valueOrUnknown(r.Times.Cook)},
+		{"Total", valueOrUnknown(r.Times.Total)},
 	}
-	var lines []string
+	var b strings.Builder
+	b.WriteString(`<table bordered striped compact><caption>Overview</caption>`)
+	shortened := false
 	for _, row := range rows {
-		lines = append(lines, tableCell(row[0], 10)+"  "+tableCell(row[1], 25))
+		value, cut := escapedField(row[1], 120)
+		shortened = shortened || cut
+		b.WriteString("<tr><th align=\"left\">" + row[0] + "</th><td align=\"left\">" + value + "</td></tr>")
 	}
-	return strings.Join(lines, "\n")
+	b.WriteString("<tr><th align=\"left\">Confidence</th><td align=\"left\">" + confidenceHTML(r.Confidence) + "</td></tr></table>")
+	return b.String(), shortened
 }
 
-func ingredientTable(ingredients []Ingredient) string {
-	lines := []string{"C  " + tableCell("AMOUNT", 10) + "  INGREDIENT", "-  " + strings.Repeat("-", 10) + "  " + strings.Repeat("-", 22)}
+func ingredientTableHTML(ingredients []Ingredient, maxBytes int) (string, bool) {
+	const open = `<table bordered striped compact><caption>🧺 Ingredients</caption><tr><th>C</th><th>Amount</th><th>Ingredient</th><th>Preparation</th></tr>`
+	const close = `</table>`
+	var b strings.Builder
+	b.WriteString(open)
+	shortened := false
 	for _, ingredient := range ingredients {
 		amount := strings.TrimSpace(strings.TrimSpace(ingredient.Amount) + " " + strings.TrimSpace(ingredient.Unit))
 		if amount == "" {
 			amount = "not shown"
 		}
-		item := strings.TrimSpace(ingredient.Item)
-		if ingredient.Preparation != "" {
-			item += ", " + strings.TrimSpace(ingredient.Preparation)
-		}
-		lines = append(lines, confidenceMark(ingredient.Confidence)+"  "+tableCell(amount, 10)+"  "+tableCell(item, 22))
-	}
-	lines = append(lines, "", "H=high  M=medium  L=low")
-	return strings.Join(lines, "\n")
-}
-
-func boundedList(items []string, maxRunes int) string {
-	var lines []string
-	used := 0
-	for _, item := range items {
-		line := "• " + limit(strings.TrimSpace(item), 260)
-		if line == "• " {
-			continue
-		}
-		lineRunes := len([]rune(line))
-		if used+lineRunes+1 > maxRunes {
+		amountHTML, amountCut := escapedField(amount, 80)
+		itemHTML, itemCut := escapedField(ingredient.Item, 220)
+		preparationHTML, preparationCut := escapedField(ingredient.Preparation, 180)
+		shortened = shortened || amountCut || itemCut || preparationCut
+		row := "<tr><td align=\"center\">" + confidenceHTML(ingredient.Confidence) + "</td><td>" + amountHTML + "</td><td>" + itemHTML + "</td><td>" + preparationHTML + "</td></tr>"
+		if b.Len()+len(row)+len(close) > maxBytes {
+			shortened = true
 			break
 		}
-		lines = append(lines, line)
-		used += lineRunes + 1
+		b.WriteString(row)
 	}
-	return strings.Join(lines, "\n")
+	b.WriteString(close)
+	return b.String(), shortened
 }
 
-func tableCell(s string, width int) string {
-	s = strings.Join(strings.Fields(s), " ")
-	runes := []rune(s)
-	if len(runes) > width {
-		if width > 1 {
-			runes = append(runes[:width-1], '…')
-		} else {
-			runes = runes[:width]
+func quotationHTML(title string, items []string, maxBytes int) (string, bool) {
+	const close = `</blockquote>`
+	var b strings.Builder
+	b.WriteString("<blockquote><b>" + html.EscapeString(title) + "</b>")
+	shortened := false
+	for _, item := range items {
+		value, cut := escapedField(item, 320)
+		shortened = shortened || cut
+		line := "<br>• " + value
+		if b.Len()+len(line)+len(close) > maxBytes {
+			shortened = true
+			break
 		}
+		b.WriteString(line)
 	}
-	return string(runes) + strings.Repeat(" ", width-len(runes))
+	b.WriteString(close)
+	return b.String(), shortened
 }
 
-func confidenceMark(v string) string {
+func listSectionHTML(title string, items []string, maxBytes int) (string, bool) {
+	return titledListHTML("<h3>"+html.EscapeString(title)+"</h3><ul>", "</ul>", items, maxBytes)
+}
+
+func detailsHTML(summary string, items []string, maxBytes int) (string, bool) {
+	return titledListHTML("<details><summary>"+html.EscapeString(summary)+"</summary><ul>", "</ul></details>", items, maxBytes)
+}
+
+func titledListHTML(open, close string, items []string, maxBytes int) (string, bool) {
+	var b strings.Builder
+	b.WriteString(open)
+	shortened := false
+	for _, item := range items {
+		value, cut := escapedField(item, 320)
+		shortened = shortened || cut
+		line := "<li>" + value + "</li>"
+		if b.Len()+len(line)+len(close) > maxBytes {
+			shortened = true
+			break
+		}
+		b.WriteString(line)
+	}
+	b.WriteString(close)
+	return b.String(), shortened
+}
+
+func stepsHTML(steps []Step, maxBytes int) (string, bool) {
+	const open = `<h3>👩‍🍳 Method</h3><ol>`
+	const close = `</ol>`
+	var b strings.Builder
+	b.WriteString(open)
+	shortened := false
+	for _, step := range steps {
+		instruction, instructionCut := escapedField(step.Instruction, 520)
+		shortened = shortened || instructionCut
+		var metadata []string
+		if step.Duration != "" {
+			duration, cut := escapedField(step.Duration, 80)
+			shortened = shortened || cut
+			metadata = append(metadata, "⏱ "+duration)
+		}
+		if step.Temperature != "" {
+			temperature, cut := escapedField(step.Temperature, 80)
+			shortened = shortened || cut
+			metadata = append(metadata, "🌡 "+temperature)
+		}
+		if step.Confidence != "high" {
+			metadata = append(metadata, confidenceLabel(step.Confidence))
+		}
+		line := "<li>" + instruction
+		if len(metadata) > 0 {
+			line += "<br><i>" + strings.Join(metadata, " · ") + "</i>"
+		}
+		line += "</li>"
+		if b.Len()+len(line)+len(close) > maxBytes {
+			shortened = true
+			break
+		}
+		b.WriteString(line)
+	}
+	b.WriteString(close)
+	return b.String(), shortened
+}
+
+func escapedField(s string, maxRunes int) (string, bool) {
+	s = strings.TrimSpace(s)
+	cut := len([]rune(s)) > maxRunes
+	return html.EscapeString(limit(s, maxRunes)), cut
+}
+
+func confidenceHTML(v string) string {
 	switch v {
 	case "high":
-		return "H"
+		return "High"
 	case "medium":
-		return "M"
+		return "<i>Medium</i>"
 	default:
-		return "L"
+		return "<mark>Low</mark>"
 	}
 }
 
