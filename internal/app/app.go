@@ -152,7 +152,7 @@ func (a *App) process(parent context.Context, j job) {
 		a.fail(parent, j, err)
 		return
 	}
-	if err := a.tg.Edit(parent, j.chatID, j.statusID, recipe.RenderHTML(r)); err != nil {
+	if err := a.tg.Edit(parent, j.chatID, j.statusID, recipe.RenderRichHTML(r)); err != nil {
 		slog.Warn("deliver recipe failed", "job", id, "error", err)
 		return
 	}

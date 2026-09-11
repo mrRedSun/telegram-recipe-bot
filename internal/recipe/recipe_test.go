@@ -23,9 +23,9 @@ func sampleRecipe() Recipe {
 	}
 }
 
-func TestRenderUsesTelegramRichHTMLAndTables(t *testing.T) {
-	out := RenderHTML(sampleRecipe())
-	for _, want := range []string{"<pre>", "AMOUNT", "<u>Ingredients</u>", "<blockquote>", "<blockquote expandable>", "⏱", "🌡"} {
+func TestRenderUsesNativeTelegramRichBlocks(t *testing.T) {
+	out := RenderRichHTML(sampleRecipe())
+	for _, want := range []string{"<h2>", "<table bordered striped compact>", "<caption>🧺 Ingredients</caption>", "<th>Amount</th>", "<blockquote>", "<details>", "<ol>", "<i>Medium</i>", "⏱", "🌡"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("render omitted %q: %s", want, out)
 		}
@@ -43,8 +43,8 @@ func TestRenderBoundsCompleteUTF8Fragments(t *testing.T) {
 	r.Ingredients[0] = Ingredient{Amount: many, Item: many, Preparation: many, Confidence: "low"}
 	r.Steps = []Step{{Instruction: many, Confidence: "low"}}
 	r.Assumptions = []string{many}
-	out := RenderHTML(r)
-	if len(out) > 4096 || !utf8.ValidString(out) || !strings.HasSuffix(out, "</i>") {
+	out := RenderRichHTML(r)
+	if len(out) > 32768 || !utf8.ValidString(out) || !strings.HasSuffix(out, "</footer>") {
 		t.Fatalf("unsafe bounded output: bytes=%d valid=%v suffix=%q", len(out), utf8.ValidString(out), out[len(out)-20:])
 	}
 }
@@ -54,5 +54,13 @@ func TestValidateStructuredSteps(t *testing.T) {
 	r.Steps[0].Confidence = "maybe"
 	if err := r.Validate(); err == nil {
 		t.Fatal("accepted invalid step confidence")
+	}
+}
+
+func TestLowConfidenceUsesRichHighlighting(t *testing.T) {
+	r := sampleRecipe()
+	r.Ingredients[0].Confidence = "low"
+	if out := RenderRichHTML(r); !strings.Contains(out, "<mark>Low</mark>") {
+		t.Fatalf("low confidence was not highlighted: %s", out)
 	}
 }
