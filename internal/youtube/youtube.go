@@ -81,6 +81,12 @@ func urlParse(raw string) (*url.URL, error) {
 }
 
 func (e Extractor) Extract(ctx context.Context, rawURL, dir string) (Evidence, error) {
+	return e.ExtractWithProgress(ctx, rawURL, dir, nil)
+}
+
+// ExtractWithProgress reports completed, non-sensitive extraction stages. The
+// callback never receives source text, URLs, filenames, or credentials.
+func (e Extractor) ExtractWithProgress(ctx context.Context, rawURL, dir string, progress func(string)) (Evidence, error) {
 	canonical, err := Normalize(rawURL)
 	if err != nil {
 		return Evidence{}, err
@@ -95,10 +101,12 @@ func (e Extractor) Extract(ctx context.Context, rawURL, dir string) (Evidence, e
 	if out, err := exec.CommandContext(ctx, "yt-dlp", args...).CombinedOutput(); err != nil {
 		return Evidence{}, fmt.Errorf("yt-dlp failed: %s", bounded(out))
 	}
+	reportProgress(progress, "download")
 	// Subtitles are useful evidence but optional. Fetch them separately so a
 	// translated-caption rate limit cannot discard a successfully downloaded video.
 	subArgs := []string{"--no-playlist", "--no-progress", "--socket-timeout", "20", "--retries", "1", "--skip-download", "--write-subs", "--write-auto-subs", "--sub-langs", "en,uk,ru,en-orig,uk-orig,ru-orig", "--sub-format", "vtt", "--convert-subs", "vtt", "--js-runtimes", "deno", "-o", output, canonical}
 	_, _ = exec.CommandContext(ctx, "yt-dlp", subArgs...).CombinedOutput()
+	reportProgress(progress, "captions")
 	// Comments are optional evidence. Keep this fetch separate so disabled
 	// comments, rate limits, or extractor changes do not discard the video.
 	commentOutput := filepath.Join(dir, "comments.%(ext)s")
@@ -106,6 +114,7 @@ func (e Extractor) Extract(ctx context.Context, rawURL, dir string) (Evidence, e
 	commentCtx, cancelComments := context.WithTimeout(ctx, 45*time.Second)
 	_, _ = exec.CommandContext(commentCtx, "yt-dlp", commentArgs...).CombinedOutput()
 	cancelComments()
+	reportProgress(progress, "comments")
 	ev := Evidence{SourceURL: canonical}
 	infos, _ := filepath.Glob(filepath.Join(dir, "source.info.json"))
 	if len(infos) == 0 {
@@ -164,8 +173,16 @@ func (e Extractor) Extract(ctx context.Context, rawURL, dir string) (Evidence, e
 	if len(ev.Frames) == 0 {
 		return ev, errors.New("video yielded no frames")
 	}
+	reportProgress(progress, "frames")
 	ev.OCR = ocr(ctx, ev.Frames, e.TesseractLangs)
+	reportProgress(progress, "ocr")
 	return ev, nil
+}
+
+func reportProgress(progress func(string), stage string) {
+	if progress != nil {
+		progress(stage)
+	}
 }
 
 func findMedia(dir string) (string, error) {
