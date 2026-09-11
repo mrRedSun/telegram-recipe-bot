@@ -2,9 +2,11 @@ package app
 
 import (
 	"context"
+	"errors"
 	"github.com/mrRedSun/telegram-recipe-bot/internal/recipe"
 	"github.com/mrRedSun/telegram-recipe-bot/internal/telegram"
 	"github.com/mrRedSun/telegram-recipe-bot/internal/youtube"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -46,19 +48,60 @@ func (fakeInfer) Infer(context.Context, youtube.Evidence) (recipe.Recipe, error)
 	return recipe.Recipe{Title: "Soup", Ingredients: []recipe.Ingredient{{Item: "water", Confidence: "high"}}, Steps: []recipe.Step{{Instruction: "Heat", Confidence: "high"}}, Confidence: "high"}, nil
 }
 func TestEndToEndMessage(t *testing.T) {
-	tg := &fakeTG{edits: make(chan string, 1)}
+	tg := &fakeTG{edits: make(chan string, 16)}
 	a := New(Config{Allowed: map[int64]struct{}{7: {}}, Workers: 1, QueueSize: 1, TempRoot: t.TempDir(), JobTimeout: time.Second}, tg, fakeExtract{}, fakeInfer{})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { _ = a.Run(ctx); close(done) }()
-	select {
-	case got := <-tg.edits:
-		if got == "" {
-			t.Fatal("empty recipe")
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case got := <-tg.edits:
+			if strings.Contains(got, "<h2>") {
+				cancel()
+				<-done
+				return
+			}
+		case <-deadline:
+			cancel()
+			<-done
+			t.Fatal("timed out waiting for rendered recipe")
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out")
 	}
-	cancel()
-	<-done
+}
+
+func TestParseGroupRecipeCommand(t *testing.T) {
+	command, argument := parseCommand("/recipe@RecipeBot https://youtube.com/shorts/d9kcEzeoFXY?si=test")
+	if command != "/recipe" || argument != "https://youtube.com/shorts/d9kcEzeoFXY?si=test" {
+		t.Fatalf("command=%q argument=%q", command, argument)
+	}
+}
+
+func TestExtractionProgressMessages(t *testing.T) {
+	for _, stage := range []string{"download", "captions", "comments", "frames"} {
+		if got := extractionProgressMessage(stage); got == "" || !strings.Contains(got, "Step") {
+			t.Fatalf("stage %q has no progress message: %q", stage, got)
+		}
+	}
+	if got := extractionProgressMessage("ocr"); got != "" {
+		t.Fatalf("terminal extraction stage should flow directly to inference: %q", got)
+	}
+}
+
+func TestFailureMessagesAreConcrete(t *testing.T) {
+	tests := []struct {
+		err  error
+		want string
+	}{
+		{context.DeadlineExceeded, "Timed out during inference"},
+		{errors.New("GLM HTTP 429"), "GLM quota unavailable"},
+		{errors.New("GLM returned invalid recipe JSON"), "GLM response was incomplete"},
+		{errors.New("yt-dlp failed"), "YouTube download failed"},
+		{errors.New("frame extraction failed"), "Frame extraction failed"},
+	}
+	for _, tt := range tests {
+		if got := failureMessage("inference", tt.err); !strings.Contains(got, tt.want) {
+			t.Errorf("failureMessage(%q)=%q, want %q", tt.err, got, tt.want)
+		}
+	}
 }

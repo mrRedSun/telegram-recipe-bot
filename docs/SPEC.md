@@ -23,8 +23,8 @@ clearly distinguishing what the source showed from what the model inferred.
 5. Require structured recipe output with per-ingredient and overall confidence,
    assumptions, and food-safety warnings. Never silently invent exact values.
 6. Acknowledge immediately, enforce a bounded queue and worker count, impose a
-   five-minute job deadline, and replace the acknowledgement with the result or
-   a useful bounded error.
+   five-minute job deadline, show seven emoji-labelled progress stages, and
+   replace the acknowledgement with the result or a concrete bounded error.
 7. Retain no application data. Job files live only in a private tmpfs directory
    and are removed after success, failure, cancellation, or timeout.
 8. Ship a non-root, read-only Docker service with no capabilities, no published
@@ -44,8 +44,13 @@ clearly distinguishing what the source showed from what the model inferred.
 - `/start`, `/help`: concise usage.
 - `/privacy`: retention and third-party processing disclosure.
 - `/status`: liveness confirmation.
+- `/recipe URL`: group-safe recipe request, including `/recipe@BotName URL`.
 - A single YouTube URL: acknowledgement, then recipe or failure message.
 - Unauthorized messages: ignored so the bot does not disclose its behavior.
+
+BotFather privacy mode may remain enabled when groups use `/recipe`. Plain group
+URLs require privacy mode to be disabled so Telegram will deliver them. Sender
+authorization always uses `message.from.id`, never the group chat ID.
 
 ## Recipe contract
 
@@ -91,6 +96,11 @@ up to 100 MiB download space and 12 JPEG frames, inside a 512 MiB tmpfs shared
 by the container. Queue overflow fails fast. Network calls, downloader retries,
 media duration, output size, HTTP bodies, Telegram messages, and job runtime are
 bounded. Restart loses queued jobs by design; users can resubmit.
+
+Progress and diagnostic logs use a process-local job sequence only. They expose
+stage names, elapsed time, duration, evidence byte/frame counts, GLM finish
+reason, and token counts; they never log Telegram identities, URLs, captions,
+descriptions, comments, OCR content, frames, model reasoning, or credentials.
 
 ## Model compatibility decision
 

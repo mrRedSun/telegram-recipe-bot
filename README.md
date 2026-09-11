@@ -5,6 +5,11 @@ YouTube video or Short. It downloads the source into ephemeral storage, extracts
 captions, OCR, metadata, uploader-authored comments, and sampled frames, then asks Z.AI GLM 5.3 to return a
 validated recipe with uncertainty made explicit.
 
+In direct messages, send the URL by itself. In groups, use
+`/recipe <YouTube URL>` (or Telegram's `/recipe@BotName <URL>` form); this works
+while BotFather privacy mode is enabled. Direct, unprefixed group links also
+work if privacy mode is disabled and Telegram delivers them to the bot.
+
 ## Why two GLM modes?
 
 Z.AI currently documents `glm-5.3` as text-only and `glm-5.3-flash` as native
@@ -21,6 +26,12 @@ Telegram long poll -> sender allowlist -> bounded queue
   -> structured GLM JSON -> validation -> native Telegram Rich Message tables
   -> unconditional temporary-directory cleanup
 ```
+
+The acknowledgement is edited through seven emoji-labelled stages covering
+download, captions, creator comments, frame sampling, OCR, GLM reconstruction,
+and Rich Message formatting. Logs correlate those stages by an anonymous job
+sequence and record durations, evidence sizes, token counts, and concrete
+failure categories without URLs, identities, source text, or model reasoning.
 
 The service stores no history or analytics. See [the full specification](docs/SPEC.md),
 [threat model](docs/THREAT_MODEL.md), and [operations guide](docs/OPERATIONS.md).

@@ -13,6 +13,12 @@ The hosted `https://api.telegram.org` endpoint supports the required Bot API
 4. Confirm `docker compose logs --tail=50` contains startup metadata but no
    secrets, then send `/status` and a known public cooking Short.
 
+For groups, `/recipe URL` works with BotFather privacy mode enabled. If plain
+unprefixed URLs must work in groups, use BotFather `/setprivacy` to disable
+privacy for this bot, then remove and re-add the bot to existing groups so the
+setting takes effect. The application allowlist still restricts requests by
+the sender's numeric user ID.
+
 ## Upgrade and rollback
 
 Record the currently deployed immutable tag. Change only `IMAGE_TAG`, pull, and
@@ -24,9 +30,12 @@ migration.
 
 Use `docker compose ps`, `docker compose logs --since=10m`, and
 `docker inspect --format '{{json .State.Health}}'`. Logs contain job sequence,
-stage failures, and confidence, not URLs or identities. Common failures are a
-private/unavailable video, YouTube extractor drift, missing subtitles with weak
-visual evidence, quota/auth errors, and Telegram token reuse by another poller.
+stage transitions, elapsed times, evidence sizes, GLM finish/token diagnostics,
+concrete failure categories, and confidence—not URLs, identities, evidence
+content, or model reasoning. Common failures are a private/unavailable video,
+YouTube extractor drift, missing subtitles with weak visual evidence,
+quota/auth errors, truncated structured output, and Telegram token reuse by
+another poller.
 
 ## Secret rotation
 
