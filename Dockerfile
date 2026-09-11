@@ -4,7 +4,8 @@ WORKDIR /src
 COPY go.mod ./
 COPY cmd ./cmd
 COPY internal ./internal
-RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/recipebot ./cmd/recipebot
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/recipebot ./cmd/recipebot \
+    && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/recipeprobe ./cmd/recipeprobe
 
 FROM python:3.13.11-alpine3.23@sha256:2f607129b1b915a949320bf0c4831a73d1c1b1be663c2b1d8c93aa35a5f44a95 AS runtime
 RUN apk add --no-cache \
@@ -18,6 +19,7 @@ RUN apk add --no-cache \
     && mkdir -p /tmp/recipebot \
     && chown recipebot:recipebot /tmp/recipebot
 COPY --from=build --chown=10001:10001 /out/recipebot /usr/local/bin/recipebot
+COPY --from=build --chown=10001:10001 /out/recipeprobe /usr/local/bin/recipeprobe
 ENV PATH="/opt/venv/bin:$PATH"
 USER 10001:10001
 EXPOSE 8080

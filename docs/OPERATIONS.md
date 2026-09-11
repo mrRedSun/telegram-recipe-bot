@@ -37,6 +37,17 @@ YouTube extractor drift, missing subtitles with weak visual evidence,
 quota/auth errors, truncated structured output, and Telegram token reuse by
 another poller.
 
+When the queue is idle, reproduce the full extraction and GLM path without
+Telegram using:
+
+```sh
+docker compose exec recipebot recipeprobe 'https://youtube.com/shorts/VIDEO_ID'
+```
+
+The probe applies the production limits and unconditional temporary cleanup. It
+prints stage/timing/evidence/token metrics and final recipe counts only; it does
+not print the URL, source evidence, recipe text, model reasoning, or secrets.
+
 ## Secret rotation
 
 Rotate at BotFather or Z.AI, update the mode-0600 `.env`, then recreate the
