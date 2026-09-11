@@ -36,6 +36,33 @@ func TestInfer(t *testing.T) {
 	if !strings.Contains(requestBody, "UPLOADER-AUTHORED COMMENTS") || !strings.Contains(requestBody, "Use sourdough") {
 		t.Fatalf("request omitted author comment evidence: %s", requestBody)
 	}
+	if !strings.Contains(requestBody, `"max_tokens":16000`) {
+		t.Fatalf("request omitted bounded GLM-5.3 output budget: %s", requestBody)
+	}
+}
+
+func TestInferReportsSafeTruncationDiagnostics(t *testing.T) {
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"choices":[{"message":{"content":"{\"title\":","reasoning_content":"private reasoning"},"finish_reason":"length"}],"usage":{"prompt_tokens":321,"completion_tokens":16000}}`)
+	}))
+	defer s.Close()
+
+	_, err := New(s.URL, "secret", "glm-5.3-flash", "high", false).Infer(context.Background(), youtube.Evidence{Title: "Sensitive title"})
+	if err == nil {
+		t.Fatal("expected malformed response error")
+	}
+	got := err.Error()
+	for _, want := range []string{`finish_reason="length"`, "content_bytes=9", "reasoning_bytes=17", "prompt_tokens=321", "completion_tokens=16000"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("error %q omitted %q", got, want)
+		}
+	}
+	for _, secret := range []string{"private reasoning", "Sensitive title", "secret"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("error leaked %q: %s", secret, got)
+		}
+	}
 }
 func TestExtractJSON(t *testing.T) {
 	if got := extractJSON("```json\n{\"a\":1}\n```"); !strings.HasPrefix(got, "{") {
