@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -51,9 +52,15 @@ type request struct {
 type apiResponse struct {
 	Choices []struct {
 		Message struct {
-			Content string `json:"content"`
+			Content          string `json:"content"`
+			ReasoningContent string `json:"reasoning_content"`
 		} `json:"message"`
+		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
+	Usage struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+	} `json:"usage"`
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error,omitempty"`
@@ -75,7 +82,7 @@ func (c *Client) Infer(ctx context.Context, ev youtube.Evidence) (recipe.Recipe,
 	if !c.vision {
 		userContent = evidence + "\n\nExtract the recipe using the system rules."
 	}
-	reqBody := request{Model: c.model, Messages: []message{{Role: "system", Content: systemPrompt}, {Role: "user", Content: userContent}}, Thinking: map[string]any{"type": "enabled"}, ReasoningEffort: c.effort, Temperature: 1, MaxTokens: 5000, ResponseFormat: map[string]any{"type": "json_object"}}
+	reqBody := request{Model: c.model, Messages: []message{{Role: "system", Content: systemPrompt}, {Role: "user", Content: userContent}}, Thinking: map[string]any{"type": "enabled"}, ReasoningEffort: c.effort, Temperature: 1, MaxTokens: 16000, ResponseFormat: map[string]any{"type": "json_object"}}
 	b, err := json.Marshal(reqBody)
 	if err != nil {
 		return recipe.Recipe{}, err
@@ -108,10 +115,18 @@ func (c *Client) Infer(ctx context.Context, ev youtube.Evidence) (recipe.Recipe,
 	if len(ar.Choices) == 0 {
 		return recipe.Recipe{}, errors.New("GLM returned no choices")
 	}
-	jsonText := extractJSON(ar.Choices[0].Message.Content)
+	choice := ar.Choices[0]
+	slog.Info("GLM response received",
+		"finish_reason", choice.FinishReason,
+		"content_bytes", len(choice.Message.Content),
+		"reasoning_bytes", len(choice.Message.ReasoningContent),
+		"prompt_tokens", ar.Usage.PromptTokens,
+		"completion_tokens", ar.Usage.CompletionTokens,
+	)
+	jsonText := extractJSON(choice.Message.Content)
 	var result recipe.Recipe
 	if err := json.Unmarshal([]byte(jsonText), &result); err != nil {
-		return recipe.Recipe{}, fmt.Errorf("GLM returned invalid recipe JSON: %w", err)
+		return recipe.Recipe{}, fmt.Errorf("GLM returned invalid recipe JSON (finish_reason=%q content_bytes=%d reasoning_bytes=%d prompt_tokens=%d completion_tokens=%d): %w", choice.FinishReason, len(choice.Message.Content), len(choice.Message.ReasoningContent), ar.Usage.PromptTokens, ar.Usage.CompletionTokens, err)
 	}
 	if err := result.Validate(); err != nil {
 		return recipe.Recipe{}, fmt.Errorf("GLM recipe validation: %w", err)
