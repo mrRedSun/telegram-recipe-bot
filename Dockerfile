@@ -7,7 +7,7 @@ COPY internal ./internal
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/recipebot ./cmd/recipebot \
     && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/recipeprobe ./cmd/recipeprobe
 
-FROM python:3.13.11-alpine3.23@sha256:2f607129b1b915a949320bf0c4831a73d1c1b1be663c2b1d8c93aa35a5f44a95 AS runtime
+FROM python:3.14.6-alpine3.23@sha256:b165067c5afc37fa5608a3c05609cc3d51aafd808a30fbfd822ee594fef55ad4 AS runtime
 RUN apk add --no-cache \
       ca-certificates deno ffmpeg tesseract-ocr \
       tesseract-ocr-data-eng tesseract-ocr-data-rus tesseract-ocr-data-ukr \
