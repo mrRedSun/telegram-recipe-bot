@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mrRedSun/telegram-recipe-bot/internal/conversation"
 	"github.com/mrRedSun/telegram-recipe-bot/internal/youtube"
 )
 
@@ -75,5 +76,29 @@ func TestSystemPromptDefinesStructuredRecipe(t *testing.T) {
 		if !strings.Contains(systemPrompt, field) {
 			t.Fatalf("system prompt omitted %s", field)
 		}
+	}
+}
+
+func TestConverseSendsBoundedHistoryAndReturnsPlainText(t *testing.T) {
+	var requestBody string
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		requestBody = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"choices":[{"message":{"content":"Hello there"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":3}}`)
+	}))
+	defer s.Close()
+	c := New(s.URL, "secret", "glm-5.3-flash", "high", true)
+	got, err := c.Converse(context.Background(), []conversation.Message{{Role: "user", Text: "Hello"}, {Role: "assistant", Text: "Hi"}, {Role: "user", Text: "How are you?"}})
+	if err != nil || got != "Hello there" {
+		t.Fatalf("got=%q err=%v", got, err)
+	}
+	for _, want := range []string{`"role":"system"`, `"role":"user"`, `"role":"assistant"`, `"max_tokens":4000`} {
+		if !strings.Contains(requestBody, want) {
+			t.Fatalf("request omitted %s: %s", want, requestBody)
+		}
+	}
+	if strings.Contains(requestBody, "response_format") {
+		t.Fatalf("conversation unexpectedly requested recipe JSON: %s", requestBody)
 	}
 }

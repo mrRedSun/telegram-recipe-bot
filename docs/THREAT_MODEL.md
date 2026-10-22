@@ -2,61 +2,78 @@
 
 ## Assets and trust boundaries
 
-Secrets are the Telegram bot token and Z.AI API key. Private user submissions
-cross Telegram, YouTube, this container, and Z.AI. GitHub/GHCR holds code and
-images, never runtime secrets. The LXC and Docker daemon are administrator-owned
-trust boundaries.
+Secrets are the Telegram bot token and Z.AI API key. User messages, captions,
+conversation context, recipe URLs/evidence, Instagram URLs, and downloaded media
+are private transient data. Telegram, Instagram, YouTube, Z.AI, this container,
+and the administrator-owned LXC/Docker daemon are separate trust boundaries.
+GitHub/GHCR holds code and images, never runtime secrets.
 
 ## Controls
 
 - Authentication: numeric Telegram sender allowlist, required at startup.
-- SSRF/input injection: exact YouTube hostname and video-ID parsing; no arbitrary
-  URLs reach `yt-dlp`; commands use argument arrays, never a shell.
-- Prompt injection: all source text, including uploader comments, is explicitly
-  untrusted evidence; the fixed
-  system prompt restricts output; JSON is parsed and semantically validated.
-- Resource exhaustion: one video, no playlists/live media, duration/size limits,
-  bounded queue/workers, timeouts, response limits, tmpfs, PID limit.
+- Group behavior: ordinary conversational/media messages are ignored unless they
+  use `/ask`, mention the bot, or reply to it. `/recipe` remains explicit.
+- Context isolation: memory keys include chat and forum topic IDs; only the newest
+  20 bounded user/assistant messages are retained; `/reset` clears history, erases queued prompt text, cancels in-flight scope
+  requests, and invalidates old generations; restart removes everything.
+- URL/SSRF policy: exact YouTube or Instagram hosts and path forms are parsed
+  before subprocesses. Instagram CDN downloads accept HTTPS only from
+  `cdninstagram.com` and `fbcdn.net`, including redirects. URL credentials,
+  lookalikes, profiles, arbitrary redirects, and non-HTTP(S) schemes are rejected.
+- Subprocesses: argument arrays only, never a shell. `gallery-dl` ignores user
+  configuration, uses no cookies, emits bounded URL-only stdout, and discards
+  stderr so signed URLs cannot reach application logs.
+- Prompt injection: recipe evidence is explicitly untrusted and constrained by a
+  fixed structured prompt. Conversation history is bounded and cannot alter
+  application configuration or invoke tools.
+- Resource exhaustion: bounded queue/workers, one source per job, carousel item,
+  per-file, aggregate byte, response, retry, redirect, timeout, tmpfs, and PID
+  limits. Multipart upload streams files rather than buffering them.
 - Secrets: environment only; no values in logs, errors, repository, image, or
   health endpoint. `.env` is ignored and documented as mode 0600.
-- Data minimization: no database, analytics, usernames, raw IDs, URLs, or media
-  logs; private per-job directory is recursively removed.
+- Data minimization: no database, analytics, usernames, raw IDs, URLs, signed CDN
+  links, source text, or media logs; private per-job directories are recursively
+  removed.
 - Container: UID/GID 10001, read-only root, dropped capabilities,
-  `no-new-privileges`, no exposed host port, pinned bases and dependencies.
+  `no-new-privileges`, no exposed host port, pinned bases and extractor versions.
 
 ## Abuse cases considered
 
-Redirects and lookalike domains are rejected before download. Crafted titles,
-descriptions, uploader comments, subtitles, OCR, and frame text cannot alter application configuration or invoke
-tools. Large, long, live, and playlist inputs are rejected. Repeated requests
-cannot create unbounded goroutines or queues. Telegram HTML is escaped. GLM and
-Telegram response bodies are bounded before logging.
+Redirects, URL credentials, and lookalike domains are rejected. Profiles and
+stories cannot trigger bulk collection. Private/login-gated Instagram failures
+do not cause cookie use or bypass attempts. Oversized media fails before upload.
+Albums preserve order and are split only at Telegram's 10-item boundary. Crafted
+messages, captions, metadata, OCR, and model replies are escaped before Telegram
+Rich Message delivery. Repeated requests cannot create unbounded goroutines,
+queues, context scopes, history, files, or HTTP bodies.
 
 ## Residual risks
 
+- Instagram can login-gate or rate-limit public posts and can change extractor or
+  CDN behavior. Anonymous support is best-effort and requires reviewed
+  `gallery-dl` updates.
+- A new legitimate Instagram CDN suffix would be rejected until reviewed and
+  added to the allowlist.
+- Telegram may reject a file that fits byte limits because of dimensions, codec,
+  duration, or transient upload behavior. The job reports a bounded failure and
+  removes temporary files.
 - YouTube can change extraction behavior or block the host IP; `yt-dlp` needs
   periodic reviewed updates.
-- Captions and sparse frames can omit ingredients or timing. Even multimodal
-  output is probabilistic and must not be treated as authoritative.
-- The bounded top-comment sample can miss a buried uploader reply. Comment
-  extraction can also be unavailable or rate-limited; it fails open to the
-  remaining evidence. Viewer comments are excluded.
+- GLM conversation and recipe output is probabilistic. Bounded history can omit
+  older context by design.
 - Tesseract ships only English, Ukrainian, and Russian language data.
 - Environment variables remain visible to privileged LXC/Docker administrators.
-- Third parties receive URLs/content according to their own policies.
-- No global Telegram webhook exclusivity check exists; another long poller using
-  the same token would conflict.
+- Third parties receive content under their own policies.
+- Another long poller using the same Telegram token would conflict.
 
 ## Questions anticipated
 
-- Why not send the YouTube URL directly to GLM? Fetching is unreliable and gives
-  the model an uncontrolled network dependency. Local bounded extraction makes
-  evidence and cleanup auditable.
-- Why not use plain GLM-5.3 for images? Z.AI documents it as text-only. The bot
-  uses OCR/captions with it and uses 5.3 Flash for actual visual input.
-- Why no database/cache? Privacy and operational simplicity outweigh repeated
-  inference cost for the expected personal workload.
-- Can the recipe be exact? Only when the source evidence is exact. Unobserved
-  values are deliberately marked uncertain.
-- What survives a restart? Nothing except the immutable image and external
-  service configuration; queued work is intentionally disposable.
+- Why no Instagram login? The requested boundary is public anonymous content.
+  Cookies would add account security, retention, and access-control risks.
+- Why `gallery-dl`? `yt-dlp` handles video but does not support image-only
+  Instagram carousels. The exact pinned gallery extractor discovers ordered
+  photo and video URLs without application-specific HTML scraping.
+- Why not keep Telegram file IDs? Persistent cache state would conflict with this
+  bot's no-history/no-media-retention policy.
+- What survives a restart? Only the immutable image and external runtime
+  configuration. Context, queued work, and downloads are intentionally lost.

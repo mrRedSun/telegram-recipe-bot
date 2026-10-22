@@ -8,63 +8,117 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/mrRedSun/telegram-recipe-bot/internal/conversation"
+	"github.com/mrRedSun/telegram-recipe-bot/internal/instagram"
 	"github.com/mrRedSun/telegram-recipe-bot/internal/recipe"
 	"github.com/mrRedSun/telegram-recipe-bot/internal/telegram"
 	"github.com/mrRedSun/telegram-recipe-bot/internal/youtube"
 )
 
 type Messenger interface {
+	Me(context.Context) (telegram.User, error)
 	Updates(context.Context, int64) ([]telegram.Update, error)
-	Send(context.Context, int64, string) (telegram.Message, error)
+	Send(context.Context, int64, int64, string) (telegram.Message, error)
 	Edit(context.Context, int64, int64, string) error
+	SendMedia(context.Context, int64, int64, []telegram.Media) error
 }
+
 type Extractor interface {
 	Extract(context.Context, string, string) (youtube.Evidence, error)
 }
+
 type progressExtractor interface {
 	ExtractWithProgress(context.Context, string, string, func(string)) (youtube.Evidence, error)
 }
-type Inferer interface {
-	Infer(context.Context, youtube.Evidence) (recipe.Recipe, error)
-}
-type Config struct {
-	Allowed            map[int64]struct{}
-	Workers, QueueSize int
-	TempRoot           string
-	JobTimeout         time.Duration
-}
-type job struct {
-	id       uint64
-	chatID   int64
-	url      string
-	statusID int64
-}
-type App struct {
-	cfg      Config
-	tg       Messenger
-	extract  Extractor
-	infer    Inferer
-	jobs     chan job
-	wg       sync.WaitGroup
-	ready    atomic.Bool
-	sequence atomic.Uint64
+
+type InstagramDownloader interface {
+	Download(context.Context, string, string) ([]instagram.Media, error)
 }
 
-func New(cfg Config, tg Messenger, extract Extractor, infer Inferer) *App {
-	return &App{cfg: cfg, tg: tg, extract: extract, infer: infer, jobs: make(chan job, cfg.QueueSize)}
+type Inferer interface {
+	Infer(context.Context, youtube.Evidence) (recipe.Recipe, error)
+	Converse(context.Context, []conversation.Message) (string, error)
 }
+
+type Config struct {
+	Allowed                  map[int64]struct{}
+	Workers, QueueSize       int
+	TempRoot                 string
+	JobTimeout               time.Duration
+	ConversationMessages     int
+	ConversationScopes       int
+	ConversationMessageRunes int
+}
+
+type jobKind string
+
+const (
+	recipeJob       jobKind = "recipe"
+	conversationJob jobKind = "conversation"
+	instagramJob    jobKind = "instagram"
+)
+
+type job struct {
+	id         uint64
+	kind       jobKind
+	chatID     int64
+	threadID   int64
+	request    string
+	statusID   int64
+	generation uint64
+	mu         sync.Mutex
+	cancel     context.CancelFunc
+}
+
+type App struct {
+	cfg              Config
+	tg               Messenger
+	extract          Extractor
+	instagram        InstagramDownloader
+	infer            Inferer
+	conversations    *conversation.Store
+	jobs             chan *job
+	slots            chan struct{}
+	wg               sync.WaitGroup
+	conversationMu   sync.Mutex
+	conversationJobs map[conversation.Key]map[uint64]*job
+	ready            atomic.Bool
+	sequence         atomic.Uint64
+	bot              telegram.User
+}
+
+func New(cfg Config, tg Messenger, extract Extractor, instagramDownloader InstagramDownloader, infer Inferer) *App {
+	return &App{
+		cfg:              cfg,
+		tg:               tg,
+		extract:          extract,
+		instagram:        instagramDownloader,
+		infer:            infer,
+		conversations:    conversation.NewStore(cfg.ConversationMessages, cfg.ConversationScopes, cfg.ConversationMessageRunes),
+		jobs:             make(chan *job, cfg.QueueSize),
+		slots:            make(chan struct{}, cfg.QueueSize+cfg.Workers),
+		conversationJobs: make(map[conversation.Key]map[uint64]*job),
+	}
+}
+
 func (a *App) Run(ctx context.Context) error {
+	bot, err := a.tg.Me(ctx)
+	if err != nil {
+		return fmt.Errorf("load Telegram bot identity: %w", err)
+	}
+	a.bot = bot
 	for i := 0; i < a.cfg.Workers; i++ {
 		a.wg.Add(1)
 		go a.worker(ctx)
 	}
 	a.ready.Store(true)
-	defer func() { a.ready.Store(false); close(a.jobs); a.wg.Wait() }()
+	defer func() { a.ready.Store(false); a.wg.Wait() }()
 	var offset int64
 	for {
 		updates, err := a.tg.Updates(ctx, offset)
@@ -80,58 +134,128 @@ func (a *App) Run(ctx context.Context) error {
 			}
 			continue
 		}
-		for _, u := range updates {
-			if u.UpdateID >= offset {
-				offset = u.UpdateID + 1
+		for _, update := range updates {
+			if update.UpdateID >= offset {
+				offset = update.UpdateID + 1
 			}
-			a.handle(ctx, u)
+			a.handle(ctx, update)
 		}
 	}
 }
+
 func (a *App) Ready() bool { return a.ready.Load() }
-func (a *App) handle(ctx context.Context, u telegram.Update) {
-	m := u.Message
-	if m == nil || m.From == nil {
+
+func (a *App) handle(ctx context.Context, update telegram.Update) {
+	message := update.Message
+	if message == nil || message.From == nil {
 		return
 	}
-	if _, ok := a.cfg.Allowed[m.From.ID]; !ok {
+	if _, ok := a.cfg.Allowed[message.From.ID]; !ok {
 		return
 	}
-	text := strings.TrimSpace(m.Text)
+	text := messageText(message)
 	command, argument := parseCommand(text)
-	if command == "/start" || command == "/help" {
-		_, _ = a.tg.Send(ctx, m.Chat.ID, "Send one YouTube Short URL. In a group, use <code>/recipe URL</code>. I’ll reconstruct the recipe and mark anything uncertain.\n\n/privacy — data handling\n/status — service status")
+	if target := commandTarget(text); target != "" && !strings.EqualFold(target, a.bot.Username) {
 		return
 	}
-	if command == "/privacy" {
-		_, _ = a.tg.Send(ctx, m.Chat.ID, "The bot keeps no recipe history, usernames, URLs, or videos. Each download and its sampled frames are removed when the job finishes. Telegram and Z.AI still process the data under their own policies.")
+	key := conversation.Key{ChatID: message.Chat.ID, ThreadID: message.MessageThreadID}
+	switch command {
+	case "/start", "/help":
+		_, _ = a.tg.Send(ctx, message.Chat.ID, message.MessageThreadID, "Send a YouTube URL for recipe extraction or a public Instagram post/Reel URL for its media. You can also chat with me directly. In groups, use <code>/recipe URL</code>, <code>/ask question</code>, mention me, or reply to me.\n\n/reset — clear this chat/topic’s temporary context\n/privacy — data handling\n/status — service status")
+		return
+	case "/privacy":
+		_, _ = a.tg.Send(ctx, message.Chat.ID, message.MessageThreadID, "Conversation context is kept only in memory, separately per DM, group, or forum topic, and is limited to the latest 20 messages. <code>/reset</code> clears it and a restart removes it. URLs, messages, context, source media, and identities are not logged. Instagram and recipe files use temporary storage and are removed after each job. Telegram, Instagram, YouTube, and Z.AI still process data under their own policies.")
+		return
+	case "/status":
+		_, _ = a.tg.Send(ctx, message.Chat.ID, message.MessageThreadID, "Recipe bot and assistant are ready.")
+		return
+	case "/reset":
+		a.resetConversation(key)
+		_, _ = a.tg.Send(ctx, message.Chat.ID, message.MessageThreadID, "🧹 Temporary conversation context cleared for this chat or topic.")
+		return
+	case "/recipe":
+		a.queueRecipe(ctx, message, argument)
 		return
 	}
-	if command == "/status" {
-		_, _ = a.tg.Send(ctx, m.Chat.ID, "Recipe bot is ready.")
+
+	if url, err := youtube.Normalize(text); err == nil {
+		a.queue(ctx, message, recipeJob, url, "🕐 <b>Queued</b> — waiting for a recipe worker…")
 		return
 	}
-	request := text
-	if command == "/recipe" {
-		request = argument
+
+	prompt := text
+	group := message.Chat.Type == "group" || message.Chat.Type == "supergroup"
+	if group {
+		explicit := false
+		switch {
+		case command == "/ask":
+			prompt, explicit = argument, true
+		case mentioned(text, a.bot.Username):
+			prompt, explicit = removeMention(text, a.bot.Username), true
+		case message.ReplyToMessage != nil && message.ReplyToMessage.From != nil && message.ReplyToMessage.From.ID == a.bot.ID:
+			explicit = true
+		}
+		if !explicit {
+			return
+		}
+	} else if command == "/ask" {
+		prompt = argument
+	} else if command != "" {
+		return
 	}
-	url, err := youtube.Normalize(request)
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		_, _ = a.tg.Send(ctx, message.Chat.ID, message.MessageThreadID, "Please include a question or a public Instagram post/Reel URL.")
+		return
+	}
+	if instagramURL, ok := instagram.Find(prompt); ok {
+		a.queue(ctx, message, instagramJob, instagramURL, "🕐 <b>Queued</b> — waiting to fetch Instagram media…")
+		return
+	}
+	a.queue(ctx, message, conversationJob, prompt, "🧠 <b>Thinking…</b>")
+}
+
+func (a *App) queueRecipe(ctx context.Context, message *telegram.Message, raw string) {
+	url, err := youtube.Normalize(raw)
 	if err != nil {
-		_, _ = a.tg.Send(ctx, m.Chat.ID, "❌ Please send one valid youtube.com or youtu.be video URL. In groups, use <code>/recipe URL</code>.")
+		_, _ = a.tg.Send(ctx, message.Chat.ID, message.MessageThreadID, "❌ Please send one valid youtube.com or youtu.be video URL after <code>/recipe</code>.")
 		return
 	}
+	a.queue(ctx, message, recipeJob, url, "🕐 <b>Queued</b> — waiting for a recipe worker…")
+}
+
+func (a *App) queue(ctx context.Context, message *telegram.Message, kind jobKind, request, statusText string) {
 	id := a.sequence.Add(1)
-	status, err := a.tg.Send(ctx, m.Chat.ID, "🕐 <b>Queued</b> — waiting for a recipe worker…")
+	status, err := a.tg.Send(ctx, message.Chat.ID, message.MessageThreadID, statusText)
 	if err != nil {
-		slog.Warn("send status failed", "job", id, "error", err)
+		slog.Warn("send status failed", "job", id, "kind", kind, "error", err)
 		return
 	}
 	select {
-	case a.jobs <- job{id: id, chatID: m.Chat.ID, url: url, statusID: status.MessageID}:
-		slog.Info("recipe job queued", "job", id, "queue_depth", len(a.jobs))
+	case a.slots <- struct{}{}:
 	default:
-		slog.Warn("recipe queue full", "job", id, "queue_capacity", cap(a.jobs))
-		_ = a.tg.Edit(ctx, m.Chat.ID, status.MessageID, "🚦 <b>Queue full</b> — both workers are busy. Please retry shortly.")
+		slog.Warn("job queue full", "job", id, "kind", kind, "queue_capacity", a.cfg.QueueSize)
+		_ = a.tg.Edit(ctx, message.Chat.ID, status.MessageID, "🚦 <b>Queue full</b> — both workers are busy. Please retry shortly.")
+		return
+	}
+	queued := &job{id: id, kind: kind, chatID: message.Chat.ID, threadID: message.MessageThreadID, request: request, statusID: status.MessageID}
+	var key conversation.Key
+	if kind == conversationJob {
+		key = conversation.Key{ChatID: message.Chat.ID, ThreadID: message.MessageThreadID}
+		queued.generation = a.conversations.Generation(key)
+		a.registerConversationJob(key, queued)
+	}
+	select {
+	case a.jobs <- queued:
+		slog.Info("job queued", "job", id, "kind", kind, "queue_depth", len(a.jobs))
+	default:
+		<-a.slots
+		if kind == conversationJob {
+			a.unregisterConversationJob(key, queued.id)
+			queued.clearRequest()
+		}
+		slog.Warn("job queue full", "job", id, "kind", kind, "queue_capacity", cap(a.jobs))
+		_ = a.tg.Edit(ctx, message.Chat.ID, status.MessageID, "🚦 <b>Queue full</b> — both workers are busy. Please retry shortly.")
 	}
 }
 
@@ -145,71 +269,344 @@ func parseCommand(text string) (command, argument string) {
 	return command, argument
 }
 
+func commandTarget(text string) string {
+	fields := strings.Fields(text)
+	if len(fields) == 0 || !strings.HasPrefix(fields[0], "/") {
+		return ""
+	}
+	parts := strings.SplitN(fields[0], "@", 2)
+	if len(parts) != 2 {
+		return ""
+	}
+	return parts[1]
+}
+
+func messageText(message *telegram.Message) string {
+	if text := strings.TrimSpace(message.Text); text != "" {
+		return text
+	}
+	return strings.TrimSpace(message.Caption)
+}
+
+func mentioned(text, username string) bool {
+	if username == "" {
+		return false
+	}
+	pattern := `(?i)(^|[^A-Za-z0-9_])@` + regexp.QuoteMeta(username) + `([^A-Za-z0-9_]|$)`
+	return regexp.MustCompile(pattern).MatchString(text)
+}
+
+func removeMention(text, username string) string {
+	if username == "" {
+		return strings.TrimSpace(text)
+	}
+	pattern := `(?i)@` + regexp.QuoteMeta(username) + `\b`
+	return strings.TrimSpace(regexp.MustCompile(pattern).ReplaceAllString(text, ""))
+}
+
 func (a *App) worker(ctx context.Context) {
 	defer a.wg.Done()
-	for j := range a.jobs {
-		a.process(ctx, j)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case item := <-a.jobs:
+			if item == nil {
+				continue
+			}
+			processed := true
+			switch item.kind {
+			case recipeJob:
+				a.processRecipe(ctx, item)
+			case conversationJob:
+				processed = a.processConversation(ctx, item)
+			case instagramJob:
+				a.processInstagram(ctx, item)
+			}
+			if !processed {
+				a.wg.Add(1)
+				go a.retryConversation(ctx, item)
+				continue
+			}
+			<-a.slots
+		}
 	}
 }
-func (a *App) process(parent context.Context, j job) {
+
+func (a *App) retryConversation(ctx context.Context, item *job) {
+	defer a.wg.Done()
+	timer := time.NewTimer(100 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		item.clearRequest()
+		a.unregisterConversationJob(conversation.Key{ChatID: item.chatID, ThreadID: item.threadID}, item.id)
+		<-a.slots
+	case <-timer.C:
+		select {
+		case <-ctx.Done():
+			item.clearRequest()
+			a.unregisterConversationJob(conversation.Key{ChatID: item.chatID, ThreadID: item.threadID}, item.id)
+			<-a.slots
+		case a.jobs <- item:
+		}
+	}
+}
+
+func (a *App) processConversation(parent context.Context, item *job) bool {
+	key := conversation.Key{ChatID: item.chatID, ThreadID: item.threadID}
+	if !a.firstConversationJob(key, item.id) {
+		return false
+	}
+	unlock, ok := a.conversations.TryLock(key)
+	if !ok {
+		return false
+	}
+	defer unlock()
+	ctx, cancel := context.WithTimeout(parent, a.cfg.JobTimeout)
+	item.mu.Lock()
+	if item.request == "" {
+		item.mu.Unlock()
+		cancel()
+		a.unregisterConversationJob(key, item.id)
+		_ = a.tg.Edit(parent, item.chatID, item.statusID, "🧹 <b>Cancelled by /reset</b>")
+		return true
+	}
+	request := item.request
+	item.cancel = cancel
+	item.mu.Unlock()
+	defer func() {
+		cancel()
+		item.mu.Lock()
+		item.request = ""
+		item.cancel = nil
+		item.mu.Unlock()
+		a.unregisterConversationJob(key, item.id)
+	}()
+	if a.conversations.Generation(key) != item.generation {
+		_ = a.tg.Edit(parent, item.chatID, item.statusID, "🧹 <b>Cancelled by /reset</b>")
+		return true
+	}
+	history := a.conversations.History(key)
+	userMessage := conversation.Message{Role: "user", Text: clipRunes(request, a.cfg.ConversationMessageRunes)}
+	request = ""
+	if keep := a.cfg.ConversationMessages - 1; keep >= 0 && len(history) > keep {
+		history = append([]conversation.Message(nil), history[len(history)-keep:]...)
+	}
+	history = append(history, userMessage)
+	started := time.Now()
+	answer, err := a.infer.Converse(ctx, history)
+	if a.conversations.Generation(key) != item.generation {
+		_ = a.tg.Edit(parent, item.chatID, item.statusID, "🧹 <b>Cancelled by /reset</b>")
+		return true
+	}
+	if err != nil {
+		slog.Warn("conversation failed", "job", item.id, "reason", assistantFailureReason(err))
+		_ = a.tg.Edit(parent, item.chatID, item.statusID, assistantFailureMessage(err))
+		return true
+	}
+	if err := a.tg.Edit(ctx, item.chatID, item.statusID, renderAssistant(answer)); err != nil {
+		slog.Warn("deliver conversation failed", "job", item.id, "error", err)
+		return true
+	}
+	a.conversations.AppendIfGeneration(key, item.generation, userMessage, conversation.Message{Role: "assistant", Text: answer})
+	slog.Info("conversation delivered", "job", item.id, "elapsed_ms", time.Since(started).Milliseconds(), "response_bytes", len(answer))
+	return true
+}
+
+func (j *job) clearRequest() {
+	j.mu.Lock()
+	j.request = ""
+	if j.cancel != nil {
+		j.cancel()
+	}
+	j.mu.Unlock()
+}
+
+func (a *App) registerConversationJob(key conversation.Key, item *job) {
+	a.conversationMu.Lock()
+	defer a.conversationMu.Unlock()
+	jobs := a.conversationJobs[key]
+	if jobs == nil {
+		jobs = make(map[uint64]*job)
+		a.conversationJobs[key] = jobs
+	}
+	jobs[item.id] = item
+}
+
+// firstConversationJob preserves arrival order while busy scopes yield workers.
+func (a *App) firstConversationJob(key conversation.Key, id uint64) bool {
+	a.conversationMu.Lock()
+	defer a.conversationMu.Unlock()
+	for queuedID := range a.conversationJobs[key] {
+		if queuedID < id {
+			return false
+		}
+	}
+	return true
+}
+
+func (a *App) unregisterConversationJob(key conversation.Key, id uint64) {
+	a.conversationMu.Lock()
+	defer a.conversationMu.Unlock()
+	jobs := a.conversationJobs[key]
+	delete(jobs, id)
+	if len(jobs) == 0 {
+		delete(a.conversationJobs, key)
+	}
+}
+
+func (a *App) resetConversation(key conversation.Key) {
+	a.conversations.Reset(key)
+	a.conversationMu.Lock()
+	jobs := make([]*job, 0, len(a.conversationJobs[key]))
+	for _, item := range a.conversationJobs[key] {
+		jobs = append(jobs, item)
+	}
+	a.conversationMu.Unlock()
+	for _, item := range jobs {
+		item.clearRequest()
+	}
+}
+
+func renderAssistant(answer string) string {
+	escaped := html.EscapeString(strings.TrimSpace(answer))
+	escaped = strings.ReplaceAll(escaped, "\n", "<br>")
+	return "<p>" + escaped + "</p>"
+}
+
+func assistantFailureReason(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	if strings.Contains(strings.ToLower(err.Error()), "glm http 429") {
+		return "provider_quota"
+	}
+	return "provider"
+}
+
+func assistantFailureMessage(err error) string {
+	switch assistantFailureReason(err) {
+	case "timeout":
+		return "⏱️ <b>Assistant timed out</b> — please retry with a shorter request."
+	case "provider_quota":
+		return "💳 <b>GLM quota unavailable</b> — Z.AI rejected the request."
+	default:
+		return "⚠️ <b>Assistant request failed</b> — please retry shortly."
+	}
+}
+
+func (a *App) processInstagram(parent context.Context, item *job) {
 	ctx, cancel := context.WithTimeout(parent, a.cfg.JobTimeout)
 	defer cancel()
 	started := time.Now()
-	dir := filepath.Join(a.cfg.TempRoot, fmt.Sprintf("job-%d", j.id))
-	slog.Info("recipe job started", "job", j.id)
-	a.progress(parent, j, "download", "⬇️ <b>Step 1/7 — Downloading video</b>\nFetching the Short and its metadata…")
+	dir := filepath.Join(a.cfg.TempRoot, fmt.Sprintf("job-%d", item.id))
 	if err := os.MkdirAll(dir, 0700); err != nil {
-		a.fail(parent, j, "workspace", err)
+		a.failInstagram(parent, item, err)
 		return
 	}
 	defer func() {
 		if err := os.RemoveAll(dir); err != nil {
-			slog.Warn("temporary job cleanup failed", "job", j.id, "error", err)
+			slog.Warn("temporary job cleanup failed", "job", item.id, "kind", item.kind, "error", err)
+		}
+	}()
+	_ = a.tg.Edit(parent, item.chatID, item.statusID, "⬇️ <b>Downloading Instagram media…</b>")
+	items, err := a.instagram.Download(ctx, item.request, dir)
+	if err != nil {
+		a.failInstagram(parent, item, err)
+		return
+	}
+	var total int64
+	media := make([]telegram.Media, 0, len(items))
+	for _, downloaded := range items {
+		total += downloaded.Size
+		media = append(media, telegram.Media{Type: string(downloaded.Kind), Path: downloaded.Path})
+	}
+	_ = a.tg.Edit(parent, item.chatID, item.statusID, fmt.Sprintf("⬆️ <b>Uploading %d Instagram item(s)…</b>", len(media)))
+	if err := a.tg.SendMedia(ctx, item.chatID, item.threadID, media); err != nil {
+		slog.Warn("Instagram delivery failed", "job", item.id, "reason", "telegram_upload")
+		_ = a.tg.Edit(parent, item.chatID, item.statusID, "⚠️ <b>Telegram upload failed</b> — the temporary files were removed. Please retry once.")
+		return
+	}
+	_ = a.tg.Edit(parent, item.chatID, item.statusID, fmt.Sprintf("✅ <b>Sent %d Instagram item(s)</b>", len(media)))
+	slog.Info("Instagram media delivered", "job", item.id, "items", len(media), "bytes", total, "elapsed_ms", time.Since(started).Milliseconds())
+}
+
+func (a *App) failInstagram(ctx context.Context, item *job, err error) {
+	reason := "unavailable"
+	message := "⚠️ <b>Instagram download failed</b> — the public post may be unavailable, login-gated, removed, or rate-limited."
+	if errors.Is(err, context.DeadlineExceeded) {
+		reason = "timeout"
+		message = "⏱️ <b>Instagram download timed out</b> — please retry once."
+	}
+	var unsupported *instagram.UnsupportedError
+	if errors.As(err, &unsupported) {
+		reason = "unsupported"
+		message = "🚫 <b>Instagram media unavailable</b> — " + html.EscapeString(unsupported.Message)
+	}
+	slog.Warn("Instagram job failed", "job", item.id, "reason", reason)
+	_ = a.tg.Edit(ctx, item.chatID, item.statusID, message)
+}
+
+func (a *App) processRecipe(parent context.Context, item *job) {
+	ctx, cancel := context.WithTimeout(parent, a.cfg.JobTimeout)
+	defer cancel()
+	started := time.Now()
+	dir := filepath.Join(a.cfg.TempRoot, fmt.Sprintf("job-%d", item.id))
+	slog.Info("recipe job started", "job", item.id)
+	a.progress(parent, item, "download", "⬇️ <b>Step 1/7 — Downloading video</b>\nFetching the Short and its metadata…")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		a.failRecipe(parent, item, "workspace", err)
+		return
+	}
+	defer func() {
+		if err := os.RemoveAll(dir); err != nil {
+			slog.Warn("temporary job cleanup failed", "job", item.id, "kind", item.kind, "error", err)
 		}
 	}()
 	extractStarted := time.Now()
-	var ev youtube.Evidence
+	var evidence youtube.Evidence
 	var err error
 	if extractor, ok := a.extract.(progressExtractor); ok {
-		ev, err = extractor.ExtractWithProgress(ctx, j.url, dir, func(stage string) {
+		evidence, err = extractor.ExtractWithProgress(ctx, item.request, dir, func(stage string) {
 			if message := extractionProgressMessage(stage); message != "" {
-				a.progress(parent, j, stage, message)
+				a.progress(parent, item, stage, message)
 			}
 		})
 	} else {
-		ev, err = a.extract.Extract(ctx, j.url, dir)
+		evidence, err = a.extract.Extract(ctx, item.request, dir)
 	}
 	if err != nil {
-		a.fail(parent, j, "extract", err)
+		a.failRecipe(parent, item, "extract", err)
 		return
 	}
-	slog.Info("recipe evidence extracted", "job", j.id,
+	slog.Info("recipe evidence extracted", "job", item.id,
 		"elapsed_ms", time.Since(extractStarted).Milliseconds(),
-		"duration_seconds", int(ev.Duration), "frames", len(ev.Frames),
-		"description_bytes", len(ev.Description), "author_comment_bytes", len(ev.AuthorComments),
-		"transcript_bytes", len(ev.Transcript), "ocr_bytes", len(ev.OCR))
-	a.progress(parent, j, "inference", "🧠 <b>Step 6/7 — Reconstructing recipe</b>\nGLM-5.3 is comparing the collected evidence…")
+		"duration_seconds", int(evidence.Duration), "frames", len(evidence.Frames),
+		"description_bytes", len(evidence.Description), "author_comment_bytes", len(evidence.AuthorComments),
+		"transcript_bytes", len(evidence.Transcript), "ocr_bytes", len(evidence.OCR))
+	a.progress(parent, item, "inference", "🧠 <b>Step 6/7 — Reconstructing recipe</b>\nGLM-5.3 is comparing the collected evidence…")
 	inferStarted := time.Now()
-	r, err := a.infer.Infer(ctx, ev)
+	result, err := a.infer.Infer(ctx, evidence)
 	if err != nil {
-		a.fail(parent, j, "inference", err)
+		a.failRecipe(parent, item, "inference", err)
 		return
 	}
-	slog.Info("recipe inference completed", "job", j.id, "elapsed_ms", time.Since(inferStarted).Milliseconds(), "confidence", r.Confidence, "ingredients", len(r.Ingredients), "steps", len(r.Steps))
-	a.progress(parent, j, "format", "🧾 <b>Step 7/7 — Formatting</b>\nBuilding the Telegram recipe card…")
-	if err := a.tg.Edit(parent, j.chatID, j.statusID, recipe.RenderRichHTML(r)); err != nil {
-		slog.Warn("deliver recipe failed", "job", j.id, "stage", "delivery", "error", err)
+	slog.Info("recipe inference completed", "job", item.id, "elapsed_ms", time.Since(inferStarted).Milliseconds(), "confidence", result.Confidence, "ingredients", len(result.Ingredients), "steps", len(result.Steps))
+	a.progress(parent, item, "format", "🧾 <b>Step 7/7 — Formatting</b>\nBuilding the Telegram recipe card…")
+	if err := a.tg.Edit(parent, item.chatID, item.statusID, recipe.RenderRichHTML(result)); err != nil {
+		slog.Warn("deliver recipe failed", "job", item.id, "stage", "delivery", "error", err)
 		return
 	}
-	slog.Info("recipe delivered", "job", j.id, "elapsed_ms", time.Since(started).Milliseconds(), "confidence", r.Confidence)
+	slog.Info("recipe delivered", "job", item.id, "elapsed_ms", time.Since(started).Milliseconds(), "confidence", result.Confidence)
 }
 
-func (a *App) progress(ctx context.Context, j job, stage, message string) {
-	if err := a.tg.Edit(ctx, j.chatID, j.statusID, message); err != nil {
-		slog.Warn("progress update failed", "job", j.id, "stage", stage, "error", err)
+func (a *App) progress(ctx context.Context, item *job, stage, message string) {
+	if err := a.tg.Edit(ctx, item.chatID, item.statusID, message); err != nil {
+		slog.Warn("progress update failed", "job", item.id, "stage", stage, "error", err)
 		return
 	}
-	slog.Info("recipe job progressed", "job", j.id, "stage", stage)
+	slog.Info("recipe job progressed", "job", item.id, "stage", stage)
 }
 
 func extractionProgressMessage(stage string) string {
@@ -227,10 +624,10 @@ func extractionProgressMessage(stage string) string {
 	}
 }
 
-func (a *App) fail(ctx context.Context, j job, stage string, err error) {
-	slog.Warn("recipe job failed", "job", j.id, "stage", stage, "reason", failureReason(err), "error", err)
-	msg := failureMessage(stage, err)
-	_ = a.tg.Edit(ctx, j.chatID, j.statusID, msg)
+func (a *App) failRecipe(ctx context.Context, item *job, stage string, err error) {
+	reason := failureReason(err)
+	slog.Warn("recipe job failed", "job", item.id, "stage", stage, "reason", reason)
+	_ = a.tg.Edit(ctx, item.chatID, item.statusID, failureMessage(stage, err))
 }
 
 func failureReason(err error) string {
@@ -272,6 +669,14 @@ func failureMessage(stage string, err error) string {
 	case "frame_extraction":
 		return "🖼️ <b>Frame extraction failed</b> — the video downloaded, but no usable visual frames could be decoded."
 	default:
-		return "⚠️ <b>Recipe processing failed during " + html.EscapeString(stage) + "</b> — the exact technical reason was recorded in the service log."
+		return "⚠️ <b>Recipe processing failed during " + html.EscapeString(stage) + "</b> — a privacy-safe failure category was recorded in the service log."
 	}
+}
+
+func clipRunes(value string, limit int) string {
+	runes := []rune(strings.TrimSpace(value))
+	if len(runes) <= limit {
+		return string(runes)
+	}
+	return string(runes[:limit])
 }
