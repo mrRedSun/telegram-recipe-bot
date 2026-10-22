@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.19
-FROM golang:1.26.6-alpine3.23@sha256:e57c41c1d5864341031181b0db34b9a537bb5773eb6428e4e5bdaea0f9135406 AS build
+FROM golang:1.26.10-alpine3.23@sha256:107301490755aa2ea1b0b43788b6e62cff2faae45a538028b193becc06aaffba AS build
 WORKDIR /src
 COPY go.mod ./
 COPY cmd ./cmd
@@ -7,13 +7,17 @@ COPY internal ./internal
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/recipebot ./cmd/recipebot \
     && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/recipeprobe ./cmd/recipeprobe
 
-FROM python:3.13.11-alpine3.23@sha256:2f607129b1b915a949320bf0c4831a73d1c1b1be663c2b1d8c93aa35a5f44a95 AS runtime
+FROM python:3.13.17-alpine3.23@sha256:a183eaab9bc16fc01807204df7ed80291550a525662753ad166da45a078db18f AS runtime
+COPY requirements-extractors.txt /tmp/requirements-extractors.txt
 RUN apk add --no-cache \
       ca-certificates deno ffmpeg tesseract-ocr \
       tesseract-ocr-data-eng tesseract-ocr-data-rus tesseract-ocr-data-ukr \
     && apk upgrade --no-cache \
     && python -m venv /opt/venv \
-    && /opt/venv/bin/pip install --no-cache-dir yt-dlp==2026.8.19 yt-dlp-ejs==0.8.0 \
+    && /opt/venv/bin/pip install --no-cache-dir -r /tmp/requirements-extractors.txt \
+    && /opt/venv/bin/python -m pip uninstall --yes pip \
+    && python -m pip uninstall --yes pip \
+    && python -c 'import ensurepip,pathlib,shutil; shutil.rmtree(pathlib.Path(ensurepip.__file__).parent)' \
     && addgroup -g 10001 recipebot \
     && adduser -D -H -u 10001 -G recipebot recipebot \
     && mkdir -p /tmp/recipebot \
