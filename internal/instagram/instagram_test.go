@@ -128,3 +128,98 @@ func TestResolverRequestsDirectVideosWithoutCredentials(t *testing.T) {
 		t.Fatalf("resolver output=%v error=%v", urls, err)
 	}
 }
+
+func TestReelUsesAnonymousVideoExtractor(t *testing.T) {
+	dir := t.TempDir()
+	script := "#!/bin/sh\ncase \"$*\" in *'--ignore-config --no-cache-dir --no-warnings --no-playlist'*'--get-url -- https://www.instagram.com/reel/Abc123/'*) ;; *) exit 1;; esac\nprintf '%s\\n' 'https://x.cdninstagram.com/video.mp4'\n"
+	if err := os.WriteFile(dir+"/yt-dlp", []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir+"/gallery-dl", []byte("#!/bin/sh\nexit 99\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	var events []Diagnostic
+	d := Downloader{MaxBytes: 100 << 20, AllowURL: func(*url.URL) bool { return false }}
+	_, err := d.DownloadWithDiagnostics(context.Background(), "https://www.instagram.com/reel/Abc123/?exln=tracking", t.TempDir(), func(e Diagnostic) { events = append(events, e) })
+	if err == nil {
+		t.Fatal("expected the injected CDN-policy rejection")
+	}
+	if len(events) < 2 || events[1].Backend != "yt-dlp" || events[1].Stage != "resolve" || events[1].Outcome != "succeeded" {
+		t.Fatalf("Reel did not use yt-dlp: %#v", events)
+	}
+}
+
+func TestExtractorDiagnosticsNeverExposeRawOutput(t *testing.T) {
+	dir := t.TempDir()
+	secret := "private-token private-user https://private.example/source"
+	script := "#!/bin/sh\nprintf '%s\\n' 'ERROR: HTTP Error 429: " + secret + "' >&2\nexit 7\n"
+	if err := os.WriteFile(dir+"/yt-dlp", []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	var events []Diagnostic
+	d := Downloader{MaxBytes: 100 << 20}
+	_, err := d.DownloadWithDiagnostics(context.Background(), "https://instagram.com/reel/Abc123/", t.TempDir(), func(e Diagnostic) { events = append(events, e) })
+	if err == nil {
+		t.Fatal("expected extractor failure")
+	}
+	raw := fmt.Sprint(events) + err.Error()
+	for _, value := range []string{"private-token", "private-user", "private.example", "Abc123"} {
+		if strings.Contains(raw, value) {
+			t.Fatalf("diagnostics leaked input or stderr: %s", raw)
+		}
+	}
+	last := events[len(events)-1]
+	if last.Stage != "resolve" || last.Backend != "yt-dlp" || last.ExitCode != 7 || last.Reason != "rate_limited" {
+		t.Fatalf("wrong diagnostics: %#v", last)
+	}
+}
+
+func TestDiagnosticBufferBoundsStderrWithoutBlocking(t *testing.T) {
+	b := &diagnosticBuffer{Limit: 16}
+	input := []byte(strings.Repeat("x", 128))
+	n, err := b.Write(input)
+	if err != nil || n != len(input) || b.Len() != 16 {
+		t.Fatalf("write=%d, %v; retained=%d", n, err, b.Len())
+	}
+	n, err = b.Write(input)
+	if err != nil || n != len(input) || b.Len() != 16 {
+		t.Fatal("full diagnostic buffer blocked or grew")
+	}
+}
+
+func TestHTTPFailureDiagnosticsIncludeStatusOnly(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprint(w, "private-token body")
+	}))
+	defer server.Close()
+	d := Downloader{MaxBytes: 100 << 20, Resolve: func(context.Context, string) ([]string, error) { return []string{server.URL}, nil }, HTTP: server.Client(), AllowURL: func(u *url.URL) bool { return u.Host == strings.TrimPrefix(server.URL, "http://") }}
+	var events []Diagnostic
+	_, err := d.DownloadWithDiagnostics(context.Background(), "https://instagram.com/p/Abc123/", t.TempDir(), func(e Diagnostic) { events = append(events, e) })
+	if err == nil {
+		t.Fatal("expected HTTP failure")
+	}
+	last := events[len(events)-1]
+	if last.Stage != "download" || last.HTTPStatus != 403 || last.Reason != "http_status" {
+		t.Fatalf("wrong HTTP diagnostics: %#v", last)
+	}
+	if strings.Contains(err.Error(), "private-token") {
+		t.Fatal("error included server body")
+	}
+}
+
+func TestCancelledResolverReportsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var events []Diagnostic
+	d := Downloader{MaxBytes: 100 << 20}
+	_, err := d.DownloadWithDiagnostics(ctx, "https://instagram.com/reel/Abc123/", t.TempDir(), func(e Diagnostic) { events = append(events, e) })
+	if err != context.Canceled {
+		t.Fatalf("cancellation lost: %v", err)
+	}
+	if events[len(events)-1].Reason != "cancelled" {
+		t.Fatalf("missing cancellation diagnostic: %#v", events)
+	}
+}

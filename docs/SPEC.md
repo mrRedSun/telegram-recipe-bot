@@ -89,9 +89,14 @@ URL normalization accepts only exact `instagram.com` and `www.instagram.com`
 hosts with one shortcode under `/p/`, `/reel/`, or `/reels/`. Query strings and fragments are removed during canonicalization; credentials,
 profiles, and lookalike hosts are rejected before an extractor runs. Canonicalization converts `/reels/` to `/reel/`.
 
-The exact-version-pinned `gallery-dl` process runs with configuration ignored,
+Reels use exact-version-pinned `yt-dlp` with configuration/cache disabled and a
+direct combined MP4 selector, matching the video downloader’s anonymous path.
+Posts/carousels retain `gallery-dl` to preserve photo and mixed-media ordering
+rather than silently dropping photos through a video-only fallback. The
+`gallery-dl` process runs with configuration ignored,
 short timeouts, two retries, a 21-item discovery guard, direct MP4 video selection, and URL-only output.
-Stderr is discarded and stdout is bounded. Only HTTPS media URLs under
+Stdout is bounded to 1 MiB. Stderr is capped at 64 KiB in memory and classified
+into fixed reason codes, then discarded; raw diagnostics never reach logs. Only HTTPS media URLs under
 `cdninstagram.com` or `fbcdn.net` are accepted, including redirects. Downloads
 are sequential, use generated numeric filenames, permit JPEG, PNG, and MP4 only,
 and enforce per-file plus aggregate limits while streaming to mode-0600 files.
@@ -129,3 +134,17 @@ Z.AI documents `glm-5.3` as text-only and `glm-5.3-flash` as multimodal. Recipe
 mode uses Flash frames when configured. Conversation mode sends text history to
 either model. Both use the existing runtime key, endpoint, reasoning effort, and
 request authentication pattern.
+
+
+## Instagram diagnostics
+
+Production logs correlate the process-local job number with backend (`yt-dlp` or
+`gallery-dl`), stage, outcome, fixed failure reason, extractor exit code, CDN HTTP
+status, item counts, byte counts, and elapsed milliseconds. Resolution, CDN policy,
+format/size validation, downloading, and Telegram upload can be distinguished.
+There are no raw extractor errors, response bodies, source/signed URLs, filenames,
+shortcodes, captions, or Telegram identities in these records.
+
+`instagramprobe` runs this same bounded extraction/download path without Telegram
+or GLM credentials, reports only the above diagnostics, and removes its tmpfs
+workspace before exit. It defaults to the production 100 MiB/five-minute limits.

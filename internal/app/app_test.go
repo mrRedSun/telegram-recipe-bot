@@ -1,8 +1,10 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -361,5 +363,35 @@ func TestConversationJobsPreserveArrivalOrder(t *testing.T) {
 	history := a.conversations.History(key)
 	if len(history) != 4 || history[0].Text != "first" || history[2].Text != "second" {
 		t.Fatalf("incorrect conversation order: %#v", history)
+	}
+}
+
+type diagnosticInstagram struct{}
+
+func (diagnosticInstagram) Download(context.Context, string, string) ([]instagram.Media, error) {
+	panic("diagnostic path was skipped")
+}
+func (diagnosticInstagram) DownloadWithDiagnostics(_ context.Context, _ string, _ string, report func(instagram.Diagnostic)) ([]instagram.Media, error) {
+	report(instagram.Diagnostic{Stage: "resolve", Backend: "yt-dlp", Outcome: "failed", Reason: "login_required", ExitCode: 4})
+	return nil, &instagram.UnsupportedError{Message: "Public media is unavailable.", Stage: "resolve", Reason: "login_required", ExitCode: 4}
+}
+func TestInstagramStageDiagnosticsIncludeAnonymousJobOnly(t *testing.T) {
+	var logs bytes.Buffer
+	prior := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	defer slog.SetDefault(prior)
+	tg := &fakeTG{}
+	a := New(testConfig(t.TempDir()), tg, fakeExtract{}, diagnosticInstagram{}, &fakeInfer{})
+	a.processInstagram(context.Background(), &job{id: 42, kind: instagramJob, chatID: 987654321, request: "https://instagram.com/reel/Private123/"})
+	text := logs.String()
+	for _, expected := range []string{`"job":42`, `"stage":"resolve"`, `"backend":"yt-dlp"`, `"reason":"login_required"`, `"exit_code":4`} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("missing diagnostic %s", expected)
+		}
+	}
+	for _, private := range []string{"987654321", "Private123", "instagram.com"} {
+		if strings.Contains(text, private) {
+			t.Fatalf("private request data reached logs: %s", private)
+		}
 	}
 }

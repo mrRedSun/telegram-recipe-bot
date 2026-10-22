@@ -51,9 +51,21 @@ When the queue is idle, `recipeprobe` still reproduces only the recipe path:
 docker compose exec recipebot recipeprobe 'https://youtube.com/shorts/VIDEO_ID'
 ```
 
-There is intentionally no Instagram probe that prints resolved URLs or media
-metadata. Validate Instagram through an allowlisted Telegram account and inspect
-only safe count/size diagnostics.
+Use the credential-free Instagram probe to reproduce a media failure without
+sending a Telegram message:
+
+```sh
+docker compose exec recipebot instagramprobe 'https://www.instagram.com/reel/SHORTCODE/'
+```
+
+The probe uses the same downloader, a 100 MiB/five-minute bound, and tmpfs cleanup.
+It reports backend, stage, outcome, fixed reason, exit/HTTP code, count/size, and
+timing only. Neither the original URL nor resolved CDN URLs/content are printed.
+A successful probe verifies extraction and download; Telegram delivery is a
+separate step. Production records include an anonymous job number for correlation.
+Reels use yt-dlp; photo/mixed carousel posts use gallery-dl. A gallery login-required
+failure does not establish that a public Reel is inaccessible via yt-dlp.
+Do not add cookies, accounts, or raw stderr to diagnose a failure.
 
 ## Secret rotation
 
