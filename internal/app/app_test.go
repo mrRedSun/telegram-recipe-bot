@@ -11,18 +11,18 @@ import (
 	"time"
 
 	"github.com/mrRedSun/telegram-recipe-bot/internal/conversation"
-	"github.com/mrRedSun/telegram-recipe-bot/internal/instagram"
 	"github.com/mrRedSun/telegram-recipe-bot/internal/recipe"
+	"github.com/mrRedSun/telegram-recipe-bot/internal/source"
 	"github.com/mrRedSun/telegram-recipe-bot/internal/telegram"
 	"github.com/mrRedSun/telegram-recipe-bot/internal/youtube"
 )
 
 type fakeTG struct {
-	once       sync.Once
-	edits      chan string
-	mu         sync.Mutex
-	sent       []string
-	mediaCount int
+	once  sync.Once
+	edits chan string
+	mu    sync.Mutex
+	sent  []string
+	input string
 }
 
 func (f *fakeTG) Me(context.Context) (telegram.User, error) {
@@ -32,7 +32,11 @@ func (f *fakeTG) Me(context.Context) (telegram.User, error) {
 func (f *fakeTG) Updates(ctx context.Context, _ int64) ([]telegram.Update, error) {
 	var out []telegram.Update
 	f.once.Do(func() {
-		out = []telegram.Update{{UpdateID: 1, Message: &telegram.Message{From: &telegram.User{ID: 7}, Chat: telegram.Chat{ID: 9, Type: "private"}, Text: "https://youtu.be/abcDEF_1234"}}}
+		text := f.input
+		if text == "" {
+			text = "https://youtu.be/abcDEF_1234"
+		}
+		out = []telegram.Update{{UpdateID: 1, Message: &telegram.Message{From: &telegram.User{ID: 7}, Chat: telegram.Chat{ID: 9, Type: "private"}, Text: text}}}
 	})
 	if out != nil {
 		return out, nil
@@ -55,31 +59,24 @@ func (f *fakeTG) Edit(_ context.Context, _ int64, _ int64, text string) error {
 	return nil
 }
 
-func (f *fakeTG) SendMedia(_ context.Context, _ int64, _ int64, media []telegram.Media) error {
-	f.mu.Lock()
-	f.mediaCount += len(media)
-	f.mu.Unlock()
-	return nil
-}
-
 type fakeExtract struct{}
 
-func (fakeExtract) Extract(context.Context, string, string) (youtube.Evidence, error) {
-	return youtube.Evidence{Title: "Soup"}, nil
-}
-
-type fakeInstagram struct{}
-
-func (fakeInstagram) Download(context.Context, string, string) ([]instagram.Media, error) {
-	return nil, errors.New("not used")
+func (fakeExtract) Extract(_ context.Context, url string, _ string) (youtube.Evidence, error) {
+	return youtube.Evidence{SourceURL: url, Title: "Soup", Description: "creator recipe caption"}, nil
 }
 
 type fakeInfer struct {
-	mu      sync.Mutex
-	history []conversation.Message
+	mu          sync.Mutex
+	history     []conversation.Message
+	recipeCalls int
+	lastSource  string
 }
 
-func (f *fakeInfer) Infer(context.Context, youtube.Evidence) (recipe.Recipe, error) {
+func (f *fakeInfer) Infer(_ context.Context, ev youtube.Evidence) (recipe.Recipe, error) {
+	f.mu.Lock()
+	f.recipeCalls++
+	f.lastSource = ev.SourceURL
+	f.mu.Unlock()
 	return recipe.Recipe{Title: "Soup", Ingredients: []recipe.Ingredient{{Item: "water", Confidence: "high"}}, Steps: []recipe.Step{{Instruction: "Heat", Confidence: "high"}}, Confidence: "high"}, nil
 }
 
@@ -104,31 +101,44 @@ func testConfig(temp string) Config {
 }
 
 func TestEndToEndRecipeMessage(t *testing.T) {
-	tg := &fakeTG{edits: make(chan string, 16)}
-	a := New(testConfig(t.TempDir()), tg, fakeExtract{}, fakeInstagram{}, &fakeInfer{})
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() { _ = a.Run(ctx); close(done) }()
-	deadline := time.After(2 * time.Second)
-	for {
-		select {
-		case got := <-tg.edits:
-			if strings.Contains(got, "<h2>") {
-				cancel()
-				<-done
-				return
+	for name, input := range map[string]string{"youtube": "https://youtu.be/abcDEF_1234", "instagram": "https://www.instagram.com/reel/Abc123/?exln=tracking", "instagram_command": "/recipe https://instagram.com/reel/Abc123/"} {
+		t.Run(name, func(t *testing.T) {
+			tg := &fakeTG{edits: make(chan string, 16), input: input}
+			infer := &fakeInfer{}
+			a := New(testConfig(t.TempDir()), tg, fakeExtract{}, infer)
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			go func() { _ = a.Run(ctx); close(done) }()
+			deadline := time.After(2 * time.Second)
+			for {
+				select {
+				case got := <-tg.edits:
+					if strings.Contains(got, "<h2>") {
+						cancel()
+						<-done
+						infer.mu.Lock()
+						defer infer.mu.Unlock()
+						if infer.recipeCalls != 1 {
+							t.Fatalf("expected exactly one recipe inference, got %d", infer.recipeCalls)
+						}
+						if name != "youtube" && infer.lastSource != "https://www.instagram.com/reel/Abc123/" {
+							t.Fatalf("wrong recipe source: %s", infer.lastSource)
+						}
+						return
+					}
+				case <-deadline:
+					cancel()
+					<-done
+					t.Fatal("timed out waiting for rendered recipe")
+				}
 			}
-		case <-deadline:
-			cancel()
-			<-done
-			t.Fatal("timed out waiting for rendered recipe")
-		}
+		})
 	}
 }
 
 func TestGroupConversationRequiresExplicitTrigger(t *testing.T) {
 	tg := &fakeTG{}
-	a := New(testConfig(t.TempDir()), tg, fakeExtract{}, fakeInstagram{}, &fakeInfer{})
+	a := New(testConfig(t.TempDir()), tg, fakeExtract{}, &fakeInfer{})
 	a.bot = telegram.User{ID: 99, Username: "RecipeBot"}
 	ordinary := telegram.Update{Message: &telegram.Message{From: &telegram.User{ID: 7}, Chat: telegram.Chat{ID: 9, Type: "supergroup"}, Text: "hello everyone"}}
 	a.handle(context.Background(), ordinary)
@@ -150,7 +160,7 @@ func TestGroupMentionAndReplyTriggerAssistant(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			tg := &fakeTG{}
-			a := New(testConfig(t.TempDir()), tg, fakeExtract{}, fakeInstagram{}, &fakeInfer{})
+			a := New(testConfig(t.TempDir()), tg, fakeExtract{}, &fakeInfer{})
 			a.bot = telegram.User{ID: 99, Username: "RecipeBot"}
 			a.handle(context.Background(), telegram.Update{Message: message})
 			if queued := <-a.jobs; queued.kind != conversationJob || queued.request != "hello" {
@@ -160,27 +170,30 @@ func TestGroupMentionAndReplyTriggerAssistant(t *testing.T) {
 	}
 }
 
-func TestInstagramDetectionUsesMediaJobAndRecipeCommandWins(t *testing.T) {
+func TestInstagramDetectionAndRecipeCommandBothQueueRecipes(t *testing.T) {
 	tg := &fakeTG{}
-	a := New(testConfig(t.TempDir()), tg, fakeExtract{}, fakeInstagram{}, &fakeInfer{})
+	a := New(testConfig(t.TempDir()), tg, fakeExtract{}, &fakeInfer{})
 	a.bot = telegram.User{ID: 99, Username: "RecipeBot"}
 	message := &telegram.Message{From: &telegram.User{ID: 7}, Chat: telegram.Chat{ID: 9, Type: "private"}, Caption: "look https://instagram.com/p/Abc123/"}
 	a.handle(context.Background(), telegram.Update{Message: message})
-	if queued := <-a.jobs; queued.kind != instagramJob {
+	if queued := <-a.jobs; queued.kind != recipeJob {
 		t.Fatalf("unexpected Instagram job: %#v", queued)
 	}
 	message.Caption = ""
 	message.Text = "/recipe https://instagram.com/p/Abc123/"
 	a.handle(context.Background(), telegram.Update{Message: message})
-	if len(a.jobs) != 0 || !strings.Contains(tg.sent[len(tg.sent)-1], "youtube.com") {
-		t.Fatalf("/recipe did not remain YouTube-specific: jobs=%d sent=%#v", len(a.jobs), tg.sent)
+	if len(a.jobs) != 1 {
+		t.Fatalf("Instagram /recipe did not queue recipe: jobs=%d", len(a.jobs))
+	}
+	if queued := <-a.jobs; queued.kind != recipeJob {
+		t.Fatalf("wrong command workflow: %s", queued.kind)
 	}
 }
 
 func TestConversationHistoryIncludesUserAndBotReplies(t *testing.T) {
 	tg := &fakeTG{}
 	infer := &fakeInfer{}
-	a := New(testConfig(t.TempDir()), tg, fakeExtract{}, fakeInstagram{}, infer)
+	a := New(testConfig(t.TempDir()), tg, fakeExtract{}, infer)
 	item := job{id: 1, kind: conversationJob, chatID: 9, threadID: 77, request: "hello", statusID: 5, generation: a.conversations.Generation(conversation.Key{ChatID: 9, ThreadID: 77})}
 	a.processConversation(context.Background(), &item)
 	history := a.conversations.History(conversation.Key{ChatID: 9, ThreadID: 77})
@@ -215,7 +228,7 @@ func TestFailureMessagesAreConcrete(t *testing.T) {
 		{context.DeadlineExceeded, "Timed out during inference"},
 		{errors.New("GLM HTTP 429"), "GLM quota unavailable"},
 		{errors.New("GLM returned invalid recipe JSON"), "GLM response was incomplete"},
-		{errors.New("yt-dlp failed"), "YouTube download failed"},
+		{errors.New("yt-dlp failed"), "Video download failed"},
 		{errors.New("frame extraction failed"), "Frame extraction failed"},
 	}
 	for _, tt := range tests {
@@ -260,7 +273,7 @@ func (s signalingExtract) Extract(context.Context, string, string) (youtube.Evid
 func TestResetCancelsInFlightConversation(t *testing.T) {
 	tg := &fakeTG{edits: make(chan string, 8)}
 	infer := &blockingInfer{started: make(chan struct{}, 1), release: make(chan struct{})}
-	a := New(testConfig(t.TempDir()), tg, fakeExtract{}, fakeInstagram{}, infer)
+	a := New(testConfig(t.TempDir()), tg, fakeExtract{}, infer)
 	key := conversation.Key{ChatID: 9, ThreadID: 3}
 	item := &job{id: 1, kind: conversationJob, chatID: 9, threadID: 3, request: "private prompt", statusID: 5, generation: a.conversations.Generation(key)}
 	a.registerConversationJob(key, item)
@@ -296,7 +309,7 @@ func TestSameScopeConversationDoesNotBlockRecipeWorker(t *testing.T) {
 	extract := signalingExtract{called: make(chan struct{}, 1)}
 	cfg := testConfig(t.TempDir())
 	cfg.Workers = 2
-	a := New(cfg, tg, extract, fakeInstagram{}, infer)
+	a := New(cfg, tg, extract, infer)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	for i := 0; i < cfg.Workers; i++ {
@@ -332,7 +345,7 @@ func TestSameScopeConversationDoesNotBlockRecipeWorker(t *testing.T) {
 
 func TestCommandForAnotherBotIsIgnored(t *testing.T) {
 	tg := &fakeTG{}
-	a := New(testConfig(t.TempDir()), tg, fakeExtract{}, fakeInstagram{}, &fakeInfer{})
+	a := New(testConfig(t.TempDir()), tg, fakeExtract{}, &fakeInfer{})
 	a.bot = telegram.User{ID: 99, Username: "RecipeBot"}
 	message := &telegram.Message{From: &telegram.User{ID: 7}, Chat: telegram.Chat{ID: 9, Type: "group"}, Text: "/ask@OtherBot hello"}
 	a.handle(context.Background(), telegram.Update{Message: message})
@@ -344,7 +357,7 @@ func TestCommandForAnotherBotIsIgnored(t *testing.T) {
 func TestConversationJobsPreserveArrivalOrder(t *testing.T) {
 	tg := &fakeTG{}
 	infer := &fakeInfer{}
-	a := New(testConfig(t.TempDir()), tg, fakeExtract{}, fakeInstagram{}, infer)
+	a := New(testConfig(t.TempDir()), tg, fakeExtract{}, infer)
 	key := conversation.Key{ChatID: 9}
 	generation := a.conversations.Generation(key)
 	first := &job{id: 1, kind: conversationJob, chatID: 9, request: "first", generation: generation}
@@ -366,25 +379,24 @@ func TestConversationJobsPreserveArrivalOrder(t *testing.T) {
 	}
 }
 
-type diagnosticInstagram struct{}
+type diagnosticSource struct{}
 
-func (diagnosticInstagram) Download(context.Context, string, string) ([]instagram.Media, error) {
-	panic("diagnostic path was skipped")
+func (diagnosticSource) Extract(context.Context, string, string) (youtube.Evidence, error) {
+	panic("diagnostic source path was skipped")
 }
-func (diagnosticInstagram) DownloadWithDiagnostics(_ context.Context, _ string, _ string, report func(instagram.Diagnostic)) ([]instagram.Media, error) {
-	report(instagram.Diagnostic{Stage: "resolve", Backend: "yt-dlp", Outcome: "failed", Reason: "login_required", ExitCode: 4})
-	return nil, &instagram.UnsupportedError{Message: "Public media is unavailable.", Stage: "resolve", Reason: "login_required", ExitCode: 4}
+func (diagnosticSource) ExtractWithDiagnostics(_ context.Context, _ string, _ string, _ func(string), report func(source.Diagnostic)) (youtube.Evidence, error) {
+	report(source.Diagnostic{Source: "instagram", Stage: "metadata", Backend: "yt-dlp", Outcome: "failed", Reason: "login_required", ExitCode: 4})
+	return youtube.Evidence{}, errors.New("source command failed (metadata: login_required)")
 }
-func TestInstagramStageDiagnosticsIncludeAnonymousJobOnly(t *testing.T) {
+func TestSourceStageDiagnosticsIncludeAnonymousJobOnly(t *testing.T) {
 	var logs bytes.Buffer
 	prior := slog.Default()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
 	defer slog.SetDefault(prior)
-	tg := &fakeTG{}
-	a := New(testConfig(t.TempDir()), tg, fakeExtract{}, diagnosticInstagram{}, &fakeInfer{})
-	a.processInstagram(context.Background(), &job{id: 42, kind: instagramJob, chatID: 987654321, request: "https://instagram.com/reel/Private123/"})
+	a := New(testConfig(t.TempDir()), &fakeTG{}, diagnosticSource{}, &fakeInfer{})
+	a.processRecipe(context.Background(), &job{id: 42, kind: recipeJob, chatID: 987654321, request: "https://instagram.com/reel/Private123/"})
 	text := logs.String()
-	for _, expected := range []string{`"job":42`, `"stage":"resolve"`, `"backend":"yt-dlp"`, `"reason":"login_required"`, `"exit_code":4`} {
+	for _, expected := range []string{`"job":42`, `"source":"instagram"`, `"stage":"metadata"`, `"backend":"yt-dlp"`, `"reason":"login_required"`, `"exit_code":4`} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("missing diagnostic %s", expected)
 		}

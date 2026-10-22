@@ -1,138 +1,92 @@
 # Telegram Recipe Bot and Assistant
 
-A private-by-default Telegram bot with three bounded workflows for allowlisted
-users:
+An allowlisted Telegram bot that reconstructs recipes from public YouTube
+videos/Shorts and Instagram Reels, plus general GLM conversation.
 
-- reconstruct a recipe from one public YouTube video or Short;
-- hold a general conversation through the existing Z.AI GLM provider;
-- download and return media from one public Instagram post or Reel, including
-  ordered carousel items.
+Send either supported video link to receive a recipe card. Both sources use
+one pipeline: anonymous yt-dlp metadata/download, creator caption/description,
+available subtitles and creator comments, sampled frames, OCR, GLM inference,
+recipe validation, and Telegram Rich Message rendering.
 
-Recipe extraction downloads the source into ephemeral storage, extracts
-captions, OCR, metadata, uploader-authored comments, and sampled frames, then
-asks Z.AI GLM 5.3 to return a validated recipe with uncertainty made explicit.
-Instagram media is returned with Telegram-native photo, video, or album methods
-and is never sent to GLM.
+## Interaction
 
-## Telegram interaction
+- Send a YouTube video/Short or Instagram Reel URL for a recipe.
+- `/recipe URL` works for either source, including `/recipe@BotName` in groups.
+- Ordinary DM text/captions are conversational. In groups, use `/ask`, a bot
+  mention, or a reply to the bot for conversation. Bare supported video links
+  trigger the same recipe workflow for either platform when Telegram delivers them.
+- `/reset` clears the current chat/topic conversation and cancels its assistant
+  work. `/help`, `/privacy`, and `/status` explain usage and service state.
 
-In direct messages:
+The recipe bot returns recipes from Instagram links. Standalone photo, video,
+and album delivery has been removed. Multi-video posts and image-only posts
+are outside the recipe source contract. The separate video downloader remains
+independent.
 
-- send a YouTube URL for recipe extraction;
-- send a public `instagram.com/p/...` or `instagram.com/reel/...` URL to receive
-  its media;
-- send ordinary text or a caption to talk to the assistant;
-- use `/reset` to clear that DM's temporary conversation context.
+## Recipe evidence
 
-In groups and supergroups, recipe requests continue to use
-`/recipe <YouTube URL>` (including Telegram's `/recipe@BotName` form). General
-assistant and Instagram requests require `/ask`, a mention of the bot, or a
-reply to one of its messages, so the bot does not answer every group message and
-remains compatible with BotFather privacy mode. Forum topics have independent
-conversation contexts. An explicit `/recipe` always means YouTube recipe
-extraction, never Instagram downloading.
+The downloader handles a single public video. Instagram's one-video playlist
+metadata is flattened so its creator caption is preserved. Actual duration is
+verified with ffprobe, including when Instagram metadata omits it. Recipe
+analysis samples up to 12 frames, runs OCR, and forwards bounded text plus frames
+when the configured GLM model supports vision. Missing subtitles or creator
+comments do not discard usable video/caption evidence.
 
-## Privacy and context
+GLM returns structured ingredients, steps, times, assumptions, warnings, and
+confidence. Untrusted source instructions cannot change the fixed extraction
+policy. Every model-derived field is escaped before Telegram formatting.
 
-The assistant keeps only the latest 20 user/assistant messages for each DM,
-group, or forum topic. Message text and captions are bounded, held in process
-memory only, omitted from logs and analytics, cleared by `/reset`, and lost on
-restart. Reset also cancels queued or in-flight assistant requests in that scope and
-suppresses their replies. Different chats and topics cannot share context.
+## Privacy and limits
 
-Recipe and Instagram jobs use private per-job directories on tmpfs. Downloads,
-frames, metadata, and uploads are removed after success, failure, cancellation,
-or timeout. Logs use anonymous process-local job numbers and bounded diagnostics;
-they never contain raw Telegram identities, messages, captions, URLs,
-conversation context, source content, credentials, or model reasoning.
+Sender authorization uses the configured numeric allowlist. Conversation context
+is in process memory only, scoped by chat/forum topic, capped at 20 messages of
+4,000 runes across 256 resident scopes. Reset and restart remove context.
 
-## Why two GLM modes?
+Source media, metadata, subtitles, and frames use private per-job tmpfs directories
+and are removed after every job. Logs contain anonymous job numbers, source
+platform, stage/backend/outcome, fixed failure reason, exit/HTTP codes, bounded
+counts/sizes, and timing. They contain no messages, URLs, identities, captions,
+source content, raw extractor output, credentials, or model reasoning.
 
-Z.AI currently documents `glm-5.3` as text-only and `glm-5.3-flash` as native
-multimodal. The default is `glm-5.3-flash`, which inspects sampled YouTube frames
-plus text evidence for recipes. Set `GLM_MODEL=glm-5.3` and
-`GLM_VISION_ENABLED=false` to use the plain model with title, description,
-uploader-authored comments, captions, and OCR only. Both models support the
-text-only conversational assistant.
+Default bounds: two workers, eight queued jobs, 100 MiB source limit, four-minute
+video limit, five-minute job deadline, 512 MiB shared tmpfs, 2 MiB metadata stdout,
+and 64 KiB raw stderr retained temporarily in memory for fixed-code classification.
 
-## Architecture
+## Development and validation
 
-```text
-Telegram long poll -> sender allowlist -> interaction policy -> bounded queue
-  recipe -> exact YouTube URL policy -> yt-dlp -> bounded evidence -> GLM JSON
-  chat   -> per-chat/topic 20-message memory -> GLM plain text
-  media  -> exact Instagram policy -> yt-dlp (Reels) / gallery-dl (posts) URL discovery
-         -> bounded anonymous CDN downloads -> Telegram photo/video/albums
-  all jobs -> timeouts, anonymous diagnostics, unconditional temp cleanup
-```
-
-Recipe acknowledgements are edited through seven emoji-labelled stages covering
-download, captions, creator comments, frame sampling, OCR, GLM reconstruction,
-and Rich Message formatting. Instagram jobs show bounded download/upload status.
-Reels use yt-dlp’s anonymous video extraction path; post/carousel extraction
-continues through gallery-dl.
-
-## Local development
-
-Requirements: Go 1.26.10+, Docker, and (for running outside Docker) `yt-dlp`,
-`gallery-dl`, FFmpeg, and Tesseract.
+Go 1.26.10+, Docker, yt-dlp, FFmpeg/ffprobe, Deno, and Tesseract are required.
 
 ```sh
 make fmt vet test race
+go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
 docker build -t telegram-recipe-bot:dev .
 ```
 
-Python extractors and their transitive dependencies are exact-version pinned in
-`requirements-extractors.txt`:
-`gallery-dl==1.32.17`, `yt-dlp==2026.8.19`, and `yt-dlp-ejs==0.8.0`. Tests use
-local fakes and do not require Telegram, Instagram, YouTube, or Z.AI credentials.
-Opt-in integration tests remain separate from deterministic CI. Pip and its
-bundled dependency copies are removed after the build; runtime upgrades must use
-a new reviewed image.
+Python dependencies are pinned in `requirements-extractors.txt`; base images and
+GitHub Actions are pinned by digest/SHA. Pip and ensurepip are build-only and
+removed afterward. CI scans source secrets and the exact image, runs smoke checks,
+and publishes immutable SHA tags only after checks pass.
 
-## Configuration
+## Configuration and deployment
 
-Copy `.env.example` to `.env`. Required values are:
-
-- `TELEGRAM_BOT_TOKEN`: BotFather token.
-- `TELEGRAM_ALLOWED_USER_IDS`: comma-separated positive numeric sender IDs.
-- `GLM_API_KEY`: Z.AI API/Coding Plan key accepted by the configured endpoint.
-- `IMAGE_TAG`: immutable `sha-*` tag produced by CI when using Compose.
-
-All limits and model options are documented in `.env.example`. The same bounded
-worker pool and five-minute job deadline cover recipes, assistant replies, and
-Instagram downloads. The service fails closed on missing secrets, an empty
-allowlist, malformed limits, or an invalid reasoning level.
-
-## Docker deployment
-
-Images are built and published only by GitHub Actions. After CI publishes the
-GHCR package:
+Copy `.env.example` to `.env` and keep it mode 0600. Set
+`TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USER_IDS`, `GLM_API_KEY`, and an immutable
+`IMAGE_TAG` for the example Compose file. Model/endpoint, reasoning, workers,
+timeouts, and source limits are documented in that example.
 
 ```sh
-cp .env.example .env
-chmod 600 .env
-# Edit .env without committing it.
-docker login ghcr.io
 docker compose config --quiet
 docker compose pull
 docker compose up -d
 docker compose ps
 ```
 
-The container runs as UID 10001 with a read-only filesystem, no Linux
-capabilities, and a 512 MiB tmpfs. No health port is published to the host.
+Production uses a non-root, read-only container with no capabilities or published
+application port. Upgrade/rollback uses immutable SHA images and exact Compose
+plus runtime-environment backups. See [operations](docs/OPERATIONS.md) for the
+metrics-only `recipeprobe`, deployment checks, and failure investigation.
 
-## Limitations
-
-Private/authenticated Instagram content, stories, profiles, highlights, and
-access-control bypasses are unsupported. Anonymous Instagram extraction is
-best-effort and can fail when Instagram login-gates or rate-limits an otherwise
-public post. The bot stores no Instagram credentials or cookies. Telegram's
-hosted Bot API limits each photo to 10 MiB, each video to 50 MiB, and each album
-to 10 items; larger carousels are sent as multiple ordered batches.
-
-Private/DRM/age-restricted/live YouTube content and playlists are unsupported.
-YouTube and Instagram may require reviewed extractor updates. Recipe output
-remains probabilistic: always use food-safety judgment, especially for meat,
-eggs, allergens, and uncertain cooking temperatures.
+Private/login-gated, DRM, live, story/profile, playlist, image-only, and multi-video
+sources are unsupported. Extraction remains subject to provider rate limits and
+extractor drift. Recipe reconstruction is probabilistic; check uncertain amounts,
+timings, allergens, and food safety.

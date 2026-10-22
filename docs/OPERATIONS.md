@@ -1,74 +1,58 @@
 # Operations
 
-## First deployment
+## Deployment
 
-The hosted `https://api.telegram.org` endpoint supports the required Bot API
-10.3 Rich Messages and native media methods. A custom or self-hosted
-`TELEGRAM_API_BASE` must run Bot API 10.3 or newer.
+Use Bot API 10.3+ for Rich Message recipe cards. Preserve the sender allowlist,
+model endpoint/key, non-root user, read-only filesystem, capabilities, and tmpfs.
 
-1. Copy `.env.example` to `.env`, set an immutable `IMAGE_TAG`, BotFather token,
-   permitted numeric Telegram IDs, and Z.AI API key; then `chmod 600 .env`.
-2. `docker compose config --quiet` and `docker compose pull`.
-3. `docker compose up -d` and `docker compose ps`.
-4. Confirm recent logs contain startup metadata but no identities, messages,
-   captions, URLs, source text, context, signed media URLs, or credentials.
-5. Send `/status`, a normal DM question, `/reset`, one known public Instagram
-   post/Reel, and a known public cooking Short.
+1. Preserve exact Compose and the mode-0600 runtime environment under `.backups`.
+2. Pin the intended immutable main-commit image, then run
+   `docker compose config --quiet` and `docker compose up -d --no-build`.
+3. Check Docker health and internal `/healthz`, startup/polling diagnostics, and
+   the running image identity. Do not print resolved Compose environment values.
+4. Verify recipe extraction using a known source and `recipeprobe`; test Telegram
+   delivery from an allowlisted account separately.
 
-For groups, `/recipe URL`, `/ask TEXT`, bot mentions, and replies work with
-BotFather privacy mode enabled. Forum replies remain in the originating topic.
-The application allowlist always restricts requests by sender ID.
+Rollback restores the previous Compose image pin and recreates the bot, then
+checks health. Keep old images and exact runtime/config backups. Restart loses
+conversation context and queued work by design; no database migration is needed.
+Images are published only through GitHub Actions. Runtime updates use new images,
+not package installation inside the container.
 
-## Upgrade and rollback
+## Recipe probe
 
-Record the deployed immutable tag. Change only `IMAGE_TAG`, pull, and recreate.
-Verify health plus the three smoke paths. Roll back by restoring the prior tag
-and running `docker compose up -d`. There is no persistent application state or
-migration; rollback also discards in-memory conversation context and active jobs.
-
-Images must be published through GitHub Actions. Do not install or update
-`gallery-dl`, `yt-dlp`, or `yt-dlp-ejs` at container startup. Extractor changes
-must arrive through a reviewed immutable image.
-
-## Diagnostics
-
-Use `docker compose ps`, privacy-filtered `docker compose logs --since=10m`, and
-`docker inspect --format '{{json .State.Health}}'`. Logs contain anonymous job
-sequence, workflow kind, stages, elapsed times, bounded item/evidence sizes, GLM
-finish/token diagnostics, and failure categories. They must not contain raw
-identities, messages, captions, URLs, context, source evidence, signed CDN URLs,
-model output/reasoning, or secrets.
-
-Common Instagram failures are login-gated/private/removed content, host rate
-limits, changed CDN domains, unsupported media formats, Bot API file limits, and
-transient Telegram upload failure. The bot never adds cookies or credentials as
-a fallback. Common recipe failures remain unavailable video, extractor drift,
-quota/auth errors, truncated structured output, and weak evidence.
-
-When the queue is idle, `recipeprobe` still reproduces only the recipe path:
+Both source types exercise the same extraction and GLM recipe path:
 
 ```sh
+docker compose exec recipebot recipeprobe 'https://www.instagram.com/reel/SHORTCODE/'
 docker compose exec recipebot recipeprobe 'https://youtube.com/shorts/VIDEO_ID'
 ```
 
-Use the credential-free Instagram probe to reproduce a media failure without
-sending a Telegram message:
+The probe reads the existing runtime configuration but sends no Telegram message.
+It runs the actual source pipeline and inference, validates the recipe, prints
+only recipe counts/confidence and evidence size/stage metrics, and removes its
+private tmpfs workspace. A successful download alone does not establish a recipe
+success: require `recipe_validated=true` and `probe cleanup completed`.
 
-```sh
-docker compose exec recipebot instagramprobe 'https://www.instagram.com/reel/SHORTCODE/'
-```
+## Diagnostics
 
-The probe uses the same downloader, a 100 MiB/five-minute bound, and tmpfs cleanup.
-It reports backend, stage, outcome, fixed reason, exit/HTTP code, count/size, and
-timing only. Neither the original URL nor resolved CDN URLs/content are printed.
-A successful probe verifies extraction and download; Telegram delivery is a
-separate step. Production records include an anonymous job number for correlation.
-Reels use yt-dlp; photo/mixed carousel posts use gallery-dl. A gallery login-required
-failure does not establish that a public Reel is inaccessible via yt-dlp.
-Do not add cookies, accounts, or raw stderr to diagnose a failure.
+Use anonymous job IDs to correlate `recipe source progressed`, recipe progress,
+evidence counts, GLM finish/token diagnostics, inference completion, and delivery.
+Backend/stage/fixed reason distinguish metadata/download, captions, comments,
+media inspection, frames, OCR, model, and Telegram failures. Never add raw stderr,
+metadata, source URLs/content, identities, credentials, or model reasoning to logs.
 
-## Secret rotation
+Instagram duration can be absent in metadata; actual ffprobe duration is required
+before sampling frames. Instagram creator captions are preserved from the selected
+entry of playlist-shaped metadata. Missing subtitles/comments are optional evidence.
 
-Rotate at BotFather or Z.AI, update the mode-0600 `.env`, then recreate the
-container. Never paste secrets into Compose YAML, Git, issues, or CI variables;
-CI does not need runtime credentials. Instagram support uses no secret.
+Private/login-gated, removed, rate-limited, unsupported multi-video/image-only,
+oversized, or overly long sources fail safely with bounded diagnostics. No cookie,
+login, or account fallback is permitted. GLM and extractor drift/quota issues need
+reviewed image/config updates. The recipe bot sends recipe cards; there is no media
+upload command or alternate Instagram download workflow.
+
+## Secrets
+
+Keep runtime `.env` mode 0600. Rotate at the provider, update it privately, and
+recreate only when rotation is explicitly authorized. CI needs no runtime secrets.

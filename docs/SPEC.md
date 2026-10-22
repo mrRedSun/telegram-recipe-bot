@@ -1,150 +1,68 @@
 # Product and engineering specification
 
-## Problem
+## Contract
 
-A permitted Telegram user needs three privacy-minimal behaviors from one bot:
-turn one public YouTube video into a structured recipe, hold a bounded general
-conversation through the existing GLM provider, and return media from one public
-Instagram post or Reel without credentials or persistent storage.
+Allowlisted users send public YouTube videos/Shorts or Instagram Reels and receive
+structured recipes. Both platforms use one recipe job, source evidence engine,
+GLM inference/validation, progress UX, and Rich Message renderer. General GLM
+conversation remains independently available. Standalone media delivery is removed.
 
-## Goals and acceptance criteria
+## Routing
 
-1. Preserve exact YouTube URL validation and the existing recipe workflow,
-   evidence extraction, structured output, confidence policy, progress UX, and
-   `/recipe` command semantics.
-2. Allow only configured Telegram user IDs. There is deliberately no public or
-   wildcard mode.
-3. Add a general GLM conversational assistant. Direct-message text and captions
-   are conversational by default. Groups and supergroups require `/ask`, an
-   exact bot mention, or a reply to the bot.
-4. Supply GLM with at most the latest 20 relevant user and assistant messages,
-   scoped independently by Telegram chat ID and forum topic ID. Bound each
-   message and the number of resident scopes. Keep context in memory only; reset
-   it with `/reset` and lose it on restart.
-5. Recognize exact public Instagram `/p/`, `/reel/`, and `/reels/` URLs after the
-   interaction policy is satisfied. Resolve media anonymously, preserve carousel
-   order, and return every item as Telegram-native photos, videos, or ordered
-   media groups. Never treat an Instagram URL after `/recipe` as a media request.
-6. Do not support private/login-gated content, stories, profiles, highlights,
-   cookies, Instagram credentials, access-control bypasses, or persistent media.
-7. Bound Instagram discovery to 20 items, each hosted Bot API photo to 10 MiB,
-   each video to 50 MiB, aggregate job data to the configured download limit,
-   extractor output to 1 MiB, redirects to five, network retries to two, and the
-   complete job to the existing deadline. Split more than 10 items into ordered
-   Telegram batches.
-8. Use Z.AI's OpenAI-compatible Chat Completions endpoint for both recipes and
-   conversation. Recipe mode remains structured JSON; conversation mode returns
-   bounded plain text.
-9. Retain no application data. Job files live only in a private tmpfs directory
-   and are removed after success, failure, cancellation, or timeout.
-10. Ship a non-root, read-only Docker service with no capabilities, no published
-    port, health checking, graceful shutdown, tests, CI, vulnerability scanning,
-    exact extractor versions, and immutable GHCR commit tags.
+`/recipe URL` accepts either supported source. Bare valid video links are recipes
+for both platforms. Relevant Instagram links in allowed DM text/captions and
+explicit group requests are also recipes. Ordinary DM text is conversational;
+groups require `/ask`, an exact bot mention, or a reply to the bot for conversation.
+Commands for another bot and unauthorized senders are ignored. Forum replies stay
+in the originating topic. `/reset` clears/cancels assistant work in that scope.
 
-## Non-goals
+URL policy accepts exact YouTube/youtu.be hosts and direct Instagram `/reel/`,
+`/reels/`, or single-video `/p/` links. Sharing queries are removed during
+canonicalization. Profiles, stories, arbitrary hosts, URL credentials, playlists,
+private/authenticated access, and access-control bypasses are excluded.
 
-- Downloading private, authenticated, story, profile, highlight, DRM-protected,
-  live, or playlist media.
-- Storing Instagram cookies, Telegram `file_id` values, chat history, analytics,
-  or downloaded content.
-- Re-encoding oversized Instagram media to evade Telegram limits.
-- Producing a guaranteed copy of a creator's recipe when evidence is missing.
-- Making Telegram, Instagram, YouTube, or Z.AI private; all are third-party
-  processors.
+## One recipe pipeline
 
-## User interaction
+1. Normalize the source and obtain bounded anonymous yt-dlp metadata with config
+   and cache disabled. Flatten exactly one video from Instagram playlist-shaped
+   metadata; reject missing/multiple videos.
+2. Preserve the selected video's metadata as a mode-0600 tmpfs snapshot. Download
+   from that snapshot with yt-dlp, source size limits, timeouts, and retries.
+3. Collect creator caption/description and available subtitles. YouTube creator
+   comments remain optional and bounded; missing Instagram comments/subtitles do
+   not discard the caption or video.
+4. Verify actual duration with ffprobe, including missing source duration metadata.
+   Reject zero/non-finite/excessive durations and oversized sources. Local media
+   analysis allows only file/pipe protocols.
+5. Extract up to 12 bounded-size frames and run OCR.
+6. Run the existing GLM structured recipe inference with text and configured vision.
+7. Validate and render the same escaped recipe card with the existing seven-stage UX.
 
-- `/start`, `/help`: concise usage for all three workflows.
-- `/privacy`: memory, cleanup, logging, and third-party disclosure.
-- `/status`: liveness confirmation.
-- `/reset`: clear the current DM/group/forum-topic context.
-- `/recipe URL`: group-safe YouTube recipe request, including
-  `/recipe@BotName URL`.
-- `/ask TEXT`: explicit conversational or Instagram request.
-- Direct-message ordinary text/caption: conversational request unless it contains
-  a supported Instagram URL or is one valid YouTube URL.
-- Group/supergroup ordinary messages: ignored unless they are an existing
-  YouTube recipe URL delivered by Telegram, `/ask`, an exact mention, or a reply
-  to the bot.
-- Unauthorized messages: ignored so the bot does not disclose its behavior.
+## Limits and privacy
 
-BotFather privacy mode may remain enabled because commands, mentions, and replies
-are delivered. Sender authorization always uses `message.from.id`, never the
-chat ID. Replies are sent into the originating `message_thread_id` when present.
+Defaults remain two active/eight queued jobs, 100 MiB source size, four-minute
+video duration, five-minute job deadline, and private per-job directories in a
+512 MiB tmpfs. Metadata stdout is capped at 2 MiB. Other command output and stderr
+are capped at 64 KiB. Context cancellation terminates subprocesses. No source
+media or recipe evidence persists after the job.
 
-## Conversation memory
+Logs correlate anonymous job IDs with source platform, stage, backend, outcome,
+fixed reason, extractor exit/HTTP code, count/size, and elapsed time. Raw stderr,
+metadata, source or CDN URLs, filenames, captions, identities, model response
+content, and reasoning never reach logs.
 
-A scope key is `(chat_id, message_thread_id)`. Non-forum chats use topic ID zero.
-The in-memory store retains only `user` and `assistant` roles, trims text and
-captions to 4,000 runes, keeps the newest 20 messages, and limits resident scopes
-to 256. Arrival-order checks and per-scope locking keep simultaneous requests ordered
-without blocking unrelated chats. Active scopes are pinned during requests; unique
-generations prevent evicted entries from reviving old work. Reset generations plus per-scope cancellation remove queued prompt text, cancel
-in-flight model requests, suppress their replies, and prevent old work from restoring
-cleared history. No context field is emitted to logs or metrics.
+Conversation context is independent of recipe jobs: in memory only, 20 messages
+of up to 4,000 runes per chat/topic, at most 256 resident scopes, ordered requests,
+pinned active entries, unique reset generations, and cancellation on reset.
 
-## Instagram media contract
+## Verification
 
-URL normalization accepts only exact `instagram.com` and `www.instagram.com`
-hosts with one shortcode under `/p/`, `/reel/`, or `/reels/`. Query strings and fragments are removed during canonicalization; credentials,
-profiles, and lookalike hosts are rejected before an extractor runs. Canonicalization converts `/reels/` to `/reel/`.
+Unit/race tests cover source routing, identical pipeline stages, creator caption
+preservation, one-video metadata flattening, missing/actual duration limits,
+output bounds, anonymous diagnostics, recipe rendering for Instagram and YouTube,
+and existing conversation controls. CI also performs vet, vulnerability and
+secret scans, image build, and hardened runtime smoke checks.
 
-Reels use exact-version-pinned `yt-dlp` with configuration/cache disabled and a
-direct combined MP4 selector, matching the video downloader’s anonymous path.
-Posts/carousels retain `gallery-dl` to preserve photo and mixed-media ordering
-rather than silently dropping photos through a video-only fallback. The
-`gallery-dl` process runs with configuration ignored,
-short timeouts, two retries, a 21-item discovery guard, direct MP4 video selection, and URL-only output.
-Stdout is bounded to 1 MiB. Stderr is capped at 64 KiB in memory and classified
-into fixed reason codes, then discarded; raw diagnostics never reach logs. Only HTTPS media URLs under
-`cdninstagram.com` or `fbcdn.net` are accepted, including redirects. Downloads
-are sequential, use generated numeric filenames, permit JPEG, PNG, and MP4 only,
-and enforce per-file plus aggregate limits while streaming to mode-0600 files.
-No extractor output, signed CDN URL, original URL, shortcode, username, caption,
-or filename reaches logs.
-
-One item uses `sendPhoto` or `sendVideo`. Two to ten items use
-`sendMediaGroup`. Longer carousels are split into ordered batches of ten while
-preserving source order. Multipart uploads stream from disk and do not buffer
-whole files in memory.
-
-## Recipe contract
-
-The existing model contract remains unchanged: `title`, `summary`, `yield`,
-structured times, ingredients, equipment, steps, assumptions, warnings, and
-confidence. Telegram output continues to use Bot API 10.3 Rich Messages with
-application-generated escaped markup.
-
-## Capacity and failure model
-
-Default capacity is two active jobs plus eight queued jobs shared across all
-workflows. Each job has a five-minute deadline and uses a private directory under
-the shared 512 MiB tmpfs. Queue overflow fails fast. Restart loses queued jobs
-and conversation context by design.
-
-Progress and diagnostic logs use only a process-local job sequence. They expose
-workflow kind, stage, elapsed time, bounded counts/sizes, GLM finish reason, and
-token counts. They never log Telegram identities, messages, captions, URLs,
-conversation context, media URLs, recipe evidence, model responses, reasoning,
-or credentials.
-
-## Model compatibility decision
-
-Z.AI documents `glm-5.3` as text-only and `glm-5.3-flash` as multimodal. Recipe
-mode uses Flash frames when configured. Conversation mode sends text history to
-either model. Both use the existing runtime key, endpoint, reasoning effort, and
-request authentication pattern.
-
-
-## Instagram diagnostics
-
-Production logs correlate the process-local job number with backend (`yt-dlp` or
-`gallery-dl`), stage, outcome, fixed failure reason, extractor exit code, CDN HTTP
-status, item counts, byte counts, and elapsed milliseconds. Resolution, CDN policy,
-format/size validation, downloading, and Telegram upload can be distinguished.
-There are no raw extractor errors, response bodies, source/signed URLs, filenames,
-shortcodes, captions, or Telegram identities in these records.
-
-`instagramprobe` runs this same bounded extraction/download path without Telegram
-or GLM credentials, reports only the above diagnostics, and removes its tmpfs
-workspace before exit. It defaults to the production 100 MiB/five-minute limits.
+`recipeprobe VIDEO_URL` exercises extraction, GLM inference, and recipe validation
+for either platform without Telegram delivery. It prints only bounded diagnostics
+and recipe counts/confidence, then confirms temporary-workspace cleanup.

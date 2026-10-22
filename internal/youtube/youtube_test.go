@@ -17,7 +17,7 @@ func TestNormalize(t *testing.T) {
 	}
 }
 func TestNormalizeRejectsSSRF(t *testing.T) {
-	for _, in := range []string{"http://127.0.0.1/x", "file:///etc/passwd", "https://youtube.com.evil.test/shorts/abcDEF_1234", "https://youtube.com/playlist?list=abc"} {
+	for _, in := range []string{"https://youtu.be", "https://youtu.be/", "http://127.0.0.1/x", "file:///etc/passwd", "https://youtube.com.evil.test/shorts/abcDEF_1234", "https://youtube.com/playlist?list=abc"} {
 		if _, err := Normalize(in); err == nil {
 			t.Errorf("accepted %q", in)
 		}

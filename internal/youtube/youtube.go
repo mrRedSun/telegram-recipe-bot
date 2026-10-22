@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -33,6 +32,7 @@ type Extractor struct {
 	MaxDuration    time.Duration
 	MaxBytes       int64
 	TesseractLangs string
+	NormalizeURL   func(string) (string, error)
 }
 type UnsupportedError struct{ Message string }
 
@@ -48,7 +48,7 @@ func Normalize(raw string) (string, error) {
 	var id string
 	switch host {
 	case "youtu.be":
-		id = strings.Trim(strings.Split(u.Path, "/")[1], " ")
+		id = strings.Split(strings.Trim(u.Path, "/"), "/")[0]
 	case "youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com":
 		if strings.HasPrefix(u.Path, "/shorts/") {
 			p := strings.Split(strings.TrimPrefix(u.Path, "/shorts/"), "/")
@@ -87,96 +87,145 @@ func (e Extractor) Extract(ctx context.Context, rawURL, dir string) (Evidence, e
 // ExtractWithProgress reports completed, non-sensitive extraction stages. The
 // callback never receives source text, URLs, filenames, or credentials.
 func (e Extractor) ExtractWithProgress(ctx context.Context, rawURL, dir string, progress func(string)) (Evidence, error) {
-	canonical, err := Normalize(rawURL)
+	return e.ExtractWithDiagnostics(ctx, rawURL, dir, progress, nil)
+}
+
+// Both supported platforms share this metadata, download, frame/OCR engine.
+func (e Extractor) ExtractWithDiagnostics(ctx context.Context, rawURL, dir string, progress func(string), report func(Diagnostic)) (result Evidence, resultErr error) {
+	started := time.Now()
+	stage, backend, platform := "url_validation", "yt-dlp", "youtube"
+	emit := func(event Diagnostic) {
+		if report != nil {
+			event.Source = platform
+			event.ElapsedMS = time.Since(started).Milliseconds()
+			report(event)
+		}
+	}
+	defer func() {
+		if resultErr != nil {
+			event := diagnose(resultErr)
+			event.Outcome = "failed"
+			if event.Stage == "" {
+				event.Stage = stage
+			}
+			if event.Backend == "" {
+				event.Backend = backend
+			}
+			emit(event)
+		}
+	}()
+	normalize := e.NormalizeURL
+	if normalize == nil {
+		normalize = Normalize
+	}
+	canonical, err := normalize(rawURL)
 	if err != nil {
-		return Evidence{}, err
+		return result, err
 	}
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return Evidence{}, err
+	if strings.HasPrefix(canonical, "https://www.instagram.com/") {
+		platform = "instagram"
 	}
-	seconds := strconv.Itoa(int(e.MaxDuration.Seconds()))
-	megabytes := strconv.FormatInt(e.MaxBytes/(1024*1024), 10) + "M"
-	output := filepath.Join(dir, "source.%(ext)s")
-	args := []string{"--no-playlist", "--no-progress", "--socket-timeout", "20", "--retries", "2", "--max-filesize", megabytes, "--match-filter", "duration <= " + seconds + " & !is_live", "--write-info-json", "--js-runtimes", "deno", "-f", "bestvideo[height<=720][ext=mp4]/bestvideo[height<=720]/best[height<=720]/best", "-o", output, canonical}
-	if out, err := exec.CommandContext(ctx, "yt-dlp", args...).CombinedOutput(); err != nil {
-		return Evidence{}, fmt.Errorf("yt-dlp failed: %s", bounded(out))
+	if err = os.MkdirAll(dir, 0700); err != nil {
+		return result, err
 	}
-	reportProgress(progress, "download")
-	// Subtitles are useful evidence but optional. Fetch them separately so a
-	// translated-caption rate limit cannot discard a successfully downloaded video.
-	subArgs := []string{"--no-playlist", "--no-progress", "--socket-timeout", "20", "--retries", "1", "--skip-download", "--write-subs", "--write-auto-subs", "--sub-langs", "en,uk,ru,en-orig,uk-orig,ru-orig", "--sub-format", "vtt", "--convert-subs", "vtt", "--js-runtimes", "deno", "-o", output, canonical}
-	_, _ = exec.CommandContext(ctx, "yt-dlp", subArgs...).CombinedOutput()
-	reportProgress(progress, "captions")
-	// Comments are optional evidence. Keep this fetch separate so disabled
-	// comments, rate limits, or extractor changes do not discard the video.
-	commentOutput := filepath.Join(dir, "comments.%(ext)s")
-	commentArgs := []string{"--no-playlist", "--no-progress", "--socket-timeout", "20", "--retries", "1", "--skip-download", "--write-info-json", "--write-comments", "--extractor-args", "youtube:comment_sort=top;max_comments=50,40,10,2,2", "--js-runtimes", "deno", "-o", commentOutput, canonical}
-	commentCtx, cancelComments := context.WithTimeout(ctx, 45*time.Second)
-	_, _ = exec.CommandContext(commentCtx, "yt-dlp", commentArgs...).CombinedOutput()
-	cancelComments()
-	reportProgress(progress, "comments")
-	ev := Evidence{SourceURL: canonical}
-	infos, _ := filepath.Glob(filepath.Join(dir, "source.info.json"))
-	if len(infos) == 0 {
-		return ev, errors.New("yt-dlp produced no metadata")
-	}
-	b, err := os.ReadFile(infos[0])
+	stage = "metadata"
+	emit(Diagnostic{Stage: stage, Backend: backend, Outcome: "started"})
+	metadataArgs := []string{"--ignore-config", "--no-cache-dir", "--no-warnings", "--no-playlist", "--playlist-end", "2", "--socket-timeout", "20", "--retries", "2", "--extractor-retries", "1", "--dump-single-json", "--skip-download", "--js-runtimes", "deno", "--", canonical}
+	raw, err := runBounded(ctx, stage, backend, metadataArgs, 2<<20)
 	if err != nil {
-		return ev, err
+		return result, err
+	}
+	selected, err := singleVideoMetadata(raw)
+	if err != nil {
+		return result, err
 	}
 	var info struct {
 		Title       string  `json:"title"`
 		Description string  `json:"description"`
 		Duration    float64 `json:"duration"`
+		IsLive      bool    `json:"is_live"`
 	}
-	if err := json.Unmarshal(b, &info); err != nil {
-		return ev, fmt.Errorf("parse metadata: %w", err)
+	if json.Unmarshal(selected, &info) != nil {
+		return result, errors.New("invalid source metadata")
 	}
-	ev.Title = info.Title
-	ev.Description = clip(info.Description, 6000)
-	ev.Duration = info.Duration
-	ev.AuthorComments, _ = readAuthorComments(filepath.Join(dir, "comments.info.json"))
+	if info.IsLive {
+		return result, &UnsupportedError{Message: "Live videos are not supported."}
+	}
 	if info.Duration > e.MaxDuration.Seconds()+1 {
-		return ev, &UnsupportedError{Message: fmt.Sprintf("That video is %.0f seconds; the limit is %.0f seconds.", info.Duration, e.MaxDuration.Seconds())}
+		return result, &UnsupportedError{Message: fmt.Sprintf("That video is %.0f seconds; the limit is %.0f seconds.", info.Duration, e.MaxDuration.Seconds())}
+	}
+	result = Evidence{SourceURL: canonical, Title: clip(info.Title, 500), Description: clip(info.Description, 6000), Duration: info.Duration}
+	snapshot := filepath.Join(dir, "source.info.json")
+	if err = os.WriteFile(snapshot, selected, 0600); err != nil {
+		return result, err
+	}
+	emit(Diagnostic{Stage: stage, Backend: backend, Outcome: "succeeded", Bytes: int64(len(selected))})
+	stage = "download"
+	emit(Diagnostic{Stage: stage, Backend: backend, Outcome: "started"})
+	output := filepath.Join(dir, "source.%(ext)s")
+	megabytes := strconv.FormatInt(e.MaxBytes/(1024*1024), 10) + "M"
+	args := []string{"--ignore-config", "--no-cache-dir", "--no-warnings", "--no-playlist", "--no-progress", "--socket-timeout", "20", "--retries", "2", "--max-filesize", megabytes, "--match-filter", "!is_live", "--js-runtimes", "deno", "-f", "bestvideo[height<=720][ext=mp4]/bestvideo[height<=720]/best[height<=720]/best", "-o", output, "--load-info-json", snapshot}
+	if _, err = runBounded(ctx, stage, backend, args, 64<<10); err != nil {
+		return result, err
 	}
 	media, err := findMedia(dir)
 	if err != nil {
-		return ev, err
+		return result, err
 	}
-	st, err := os.Stat(media)
+	stat, err := os.Stat(media)
 	if err != nil {
-		return ev, err
+		return result, err
 	}
-	if st.Size() > e.MaxBytes {
-		return ev, errors.New("download exceeded configured size limit")
+	if stat.Size() > e.MaxBytes {
+		return result, &UnsupportedError{Message: "That video exceeds the configured temporary download limit."}
 	}
-	ev.Transcript = readVTT(dir)
-	framesDir := filepath.Join(dir, "frames")
-	if err := os.Mkdir(framesDir, 0700); err != nil {
-		return ev, err
+	emit(Diagnostic{Stage: stage, Backend: backend, Outcome: "succeeded", Bytes: stat.Size()})
+	reportProgress(progress, "download")
+	stage = "captions"
+	subArgs := []string{"--ignore-config", "--no-cache-dir", "--no-warnings", "--no-playlist", "--no-progress", "--socket-timeout", "20", "--retries", "1", "--skip-download", "--write-subs", "--write-auto-subs", "--sub-langs", "en,uk,ru,en-orig,uk-orig,ru-orig", "--sub-format", "vtt", "--convert-subs", "vtt", "--js-runtimes", "deno", "-o", output, "--load-info-json", snapshot}
+	if _, optionalErr := runBounded(ctx, stage, backend, subArgs, 64<<10); optionalErr != nil {
+		event := diagnose(optionalErr)
+		event.Outcome = "unavailable"
+		emit(event)
 	}
-	framePattern := filepath.Join(framesDir, "frame-%03d.jpg")
-	interval := info.Duration / 12
-	if interval < 2 {
-		interval = 2
+	result.Transcript = readVTT(dir)
+	reportProgress(progress, "captions")
+	stage = "comments"
+	if platform == "youtube" {
+		commentArgs := []string{"--ignore-config", "--no-cache-dir", "--no-warnings", "--no-playlist", "--no-progress", "--socket-timeout", "20", "--retries", "1", "--skip-download", "--write-info-json", "--write-comments", "--extractor-args", "youtube:comment_sort=top;max_comments=50,40,10,2,2", "--js-runtimes", "deno", "-o", filepath.Join(dir, "comments.%(ext)s"), canonical}
+		commentCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+		_, optionalErr := runBounded(commentCtx, stage, backend, commentArgs, 64<<10)
+		cancel()
+		if optionalErr != nil {
+			event := diagnose(optionalErr)
+			event.Outcome = "unavailable"
+			emit(event)
+		}
+		result.AuthorComments, _ = readAuthorComments(filepath.Join(dir, "comments.info.json"))
 	}
-	if interval > 15 {
-		interval = 15
+	reportProgress(progress, "comments")
+	stage, backend = "media_validation", "ffprobe"
+	probe, err := runBounded(ctx, stage, backend, []string{"-v", "error", "-protocol_whitelist", "file,pipe", "-show_entries", "format=duration", "-of", "json", media}, 16<<10)
+	if err != nil {
+		return result, err
 	}
-	filter := fmt.Sprintf("fps=1/%.3f,scale=768:-2:force_original_aspect_ratio=decrease", interval)
-	cmd := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-loglevel", "error", "-i", media, "-vf", filter, "-frames:v", "12", "-q:v", "5", framePattern)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return ev, fmt.Errorf("frame extraction failed: %s", bounded(out))
+	result.Duration, err = mediaDuration(probe, e.MaxDuration)
+	if err != nil {
+		return result, err
 	}
-	ev.Frames, _ = filepath.Glob(filepath.Join(framesDir, "*.jpg"))
-	sort.Strings(ev.Frames)
-	if len(ev.Frames) == 0 {
-		return ev, errors.New("video yielded no frames")
+	stage, backend = "frames", "ffmpeg"
+	frames, err := extractFrames(ctx, media, dir, result.Duration)
+	if err != nil {
+		return result, err
 	}
+	result.Frames = frames
+	emit(Diagnostic{Stage: stage, Backend: backend, Outcome: "succeeded", Items: len(frames)})
 	reportProgress(progress, "frames")
-	ev.OCR = ocr(ctx, ev.Frames, e.TesseractLangs)
+	stage, backend = "ocr", "tesseract"
+	result.OCR = ocr(ctx, frames, e.TesseractLangs)
+	emit(Diagnostic{Stage: stage, Backend: backend, Outcome: "succeeded", Bytes: int64(len(result.OCR))})
 	reportProgress(progress, "ocr")
-	return ev, nil
+	return result, nil
 }
 
 func reportProgress(progress func(string), stage string) {

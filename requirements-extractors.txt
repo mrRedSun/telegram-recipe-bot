@@ -1,7 +1,6 @@
-# Runtime extractors and their complete Python dependency set.
+# Video extractor and its pinned HTTP/runtime dependency set.
 certifi==2026.10.19
 charset-normalizer==3.5.2
-gallery-dl==1.32.17
 idna==3.20
 requests==2.34.2
 urllib3==2.8.0
