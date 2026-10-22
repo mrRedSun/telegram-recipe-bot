@@ -15,6 +15,9 @@ RUN apk add --no-cache \
     && apk upgrade --no-cache \
     && python -m venv /opt/venv \
     && /opt/venv/bin/pip install --no-cache-dir -r /tmp/requirements-extractors.txt \
+    && /opt/venv/bin/python -m pip uninstall --yes pip \
+    && python -m pip uninstall --yes pip \
+    && python -c 'import ensurepip,pathlib,shutil; shutil.rmtree(pathlib.Path(ensurepip.__file__).parent)' \
     && addgroup -g 10001 recipebot \
     && adduser -D -H -u 10001 -G recipebot recipebot \
     && mkdir -p /tmp/recipebot \

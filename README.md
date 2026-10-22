@@ -84,7 +84,9 @@ Python extractors and their transitive dependencies are exact-version pinned in
 `requirements-extractors.txt`:
 `gallery-dl==1.32.17`, `yt-dlp==2026.8.19`, and `yt-dlp-ejs==0.8.0`. Tests use
 local fakes and do not require Telegram, Instagram, YouTube, or Z.AI credentials.
-Opt-in integration tests remain separate from deterministic CI.
+Opt-in integration tests remain separate from deterministic CI. Pip and its
+bundled dependency copies are removed after the build; runtime upgrades must use
+a new reviewed image.
 
 ## Configuration
 

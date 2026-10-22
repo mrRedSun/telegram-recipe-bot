@@ -79,7 +79,7 @@ jobs:
           docker load --input "${RUNNER_TEMP}/image.tar"
           docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --entrypoint gallery-dl "${IMAGE_REF}" --version
           docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --entrypoint yt-dlp "${IMAGE_REF}" --version
-          docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --entrypoint /opt/venv/bin/python "${IMAGE_REF}" -c 'import os, gallery_dl, requests; assert os.getuid() == 10001'
+          docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --entrypoint /opt/venv/bin/python "${IMAGE_REF}" -c 'import os, importlib.util, gallery_dl, requests; assert os.getuid() == 10001; assert importlib.util.find_spec("pip") is None; assert importlib.util.find_spec("ensurepip") is None'
       - name: Publish scanned image
         if: github.event_name == 'push'
         run: docker push "${IMAGE_REF}"
