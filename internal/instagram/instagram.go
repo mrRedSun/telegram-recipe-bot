@@ -41,7 +41,28 @@ type Media struct {
 	Size int64
 }
 
-type UnsupportedError struct{ Message string }
+// UnsupportedError exposes only application-authored text and fixed diagnostics.
+type UnsupportedError struct {
+	Message    string
+	Reason     string
+	Stage      string
+	ExitCode   int
+	HTTPStatus int
+}
+
+// Diagnostic deliberately has no URL, filename, content or raw-error field.
+type Diagnostic struct {
+	Stage      string `json:"stage"`
+	Backend    string `json:"backend"`
+	Outcome    string `json:"outcome"`
+	Reason     string `json:"reason,omitempty"`
+	ExitCode   int    `json:"exit_code,omitempty"`
+	HTTPStatus int    `json:"http_status,omitempty"`
+	Item       int    `json:"item,omitempty"`
+	Items      int    `json:"items,omitempty"`
+	Bytes      int64  `json:"bytes,omitempty"`
+	ElapsedMS  int64  `json:"elapsed_ms"`
+}
 
 func (e *UnsupportedError) Error() string { return e.Message }
 
@@ -92,6 +113,40 @@ func Find(text string) (string, bool) {
 }
 
 func (d Downloader) Download(ctx context.Context, rawURL, dir string) ([]Media, error) {
+	return d.DownloadWithDiagnostics(ctx, rawURL, dir, nil)
+}
+
+func (d Downloader) DownloadWithDiagnostics(ctx context.Context, rawURL, dir string, report func(Diagnostic)) (items []Media, resultErr error) {
+	started := time.Now()
+	stage, backend, itemIndex := "url_validation", "", 0
+	emit := func(event Diagnostic) {
+		if report != nil {
+			event.ElapsedMS = time.Since(started).Milliseconds()
+			report(event)
+		}
+	}
+	defer func() {
+		if resultErr != nil {
+			diagnostic := Diagnostic{Stage: stage, Backend: backend, Outcome: "failed", Reason: "internal", Item: itemIndex}
+			var unsupported *UnsupportedError
+			if errors.As(resultErr, &unsupported) {
+				if unsupported.Reason != "" {
+					diagnostic.Reason = unsupported.Reason
+				}
+				if unsupported.Stage != "" {
+					diagnostic.Stage = unsupported.Stage
+				}
+				diagnostic.ExitCode, diagnostic.HTTPStatus = unsupported.ExitCode, unsupported.HTTPStatus
+			}
+			if errors.Is(resultErr, context.DeadlineExceeded) {
+				diagnostic.Reason = "timeout"
+			}
+			if errors.Is(resultErr, context.Canceled) {
+				diagnostic.Reason = "cancelled"
+			}
+			emit(diagnostic)
+		}
+	}()
 	canonical, err := Normalize(rawURL)
 	if err != nil {
 		return nil, err
@@ -99,9 +154,18 @@ func (d Downloader) Download(ctx context.Context, rawURL, dir string) ([]Media, 
 	if d.MaxItems < 1 {
 		d.MaxItems = 20
 	}
+	backend = "gallery-dl"
+	if strings.Contains(canonical, "/reel/") {
+		backend = "yt-dlp"
+	}
+	stage = "resolve"
+	emit(Diagnostic{Stage: stage, Backend: backend, Outcome: "started"})
 	resolve := d.Resolve
 	if resolve == nil {
 		resolve = func(ctx context.Context, target string) ([]string, error) {
+			if backend == "yt-dlp" {
+				return resolveWithYTDLP(ctx, target, d.MaxItems)
+			}
 			return resolveWithGalleryDL(ctx, target, d.MaxItems)
 		}
 	}
@@ -110,11 +174,13 @@ func (d Downloader) Download(ctx context.Context, rawURL, dir string) ([]Media, 
 		return nil, err
 	}
 	if len(mediaURLs) == 0 {
-		return nil, &UnsupportedError{Message: "Instagram returned no downloadable public media. The post may require login or be rate-limited."}
+		return nil, &UnsupportedError{Message: "Instagram returned no downloadable public media. The post may require login or be rate-limited.", Reason: "empty_result"}
 	}
 	if len(mediaURLs) > d.MaxItems {
-		return nil, &UnsupportedError{Message: fmt.Sprintf("That Instagram post has more than the supported %d media items.", d.MaxItems)}
+		return nil, &UnsupportedError{Message: fmt.Sprintf("That Instagram post has more than the supported %d media items.", d.MaxItems), Reason: "item_limit"}
 	}
+	emit(Diagnostic{Stage: stage, Backend: backend, Outcome: "succeeded", Items: len(mediaURLs)})
+	stage = "workspace"
 	mediaDir := filepath.Join(dir, "instagram")
 	if err := os.MkdirAll(mediaDir, 0700); err != nil {
 		return nil, err
@@ -135,11 +201,13 @@ func (d Downloader) Download(ctx context.Context, rawURL, dir string) ([]Media, 
 		return nil
 	}
 	var total int64
-	items := make([]Media, 0, len(mediaURLs))
+	items = make([]Media, 0, len(mediaURLs))
 	for index, mediaURL := range mediaURLs {
+		stage, itemIndex = "download", index+1
+		emit(Diagnostic{Stage: stage, Backend: backend, Outcome: "started", Item: itemIndex, Items: len(mediaURLs)})
 		u, err := url.Parse(strings.TrimSpace(mediaURL))
 		if err != nil || !d.allowed(u) {
-			return nil, errors.New("Instagram extractor returned an unexpected media host")
+			return nil, &UnsupportedError{Message: "Instagram returned an unexpected media host.", Stage: "cdn_validation", Reason: "unexpected_host"}
 		}
 		item, err := d.downloadOne(ctx, client, u.String(), mediaDir, index+1, d.MaxBytes-total)
 		if err != nil {
@@ -147,9 +215,10 @@ func (d Downloader) Download(ctx context.Context, rawURL, dir string) ([]Media, 
 		}
 		total += item.Size
 		if total > d.MaxBytes {
-			return nil, &UnsupportedError{Message: "That Instagram post exceeds the configured temporary download limit."}
+			return nil, &UnsupportedError{Message: "That Instagram post exceeds the configured temporary download limit.", Stage: "media_validation", Reason: "byte_limit"}
 		}
 		items = append(items, item)
+		emit(Diagnostic{Stage: stage, Backend: backend, Outcome: "succeeded", Item: itemIndex, Items: len(mediaURLs), Bytes: item.Size})
 	}
 	return items, nil
 }
@@ -159,14 +228,18 @@ func (d Downloader) downloadOne(ctx context.Context, client *http.Client, mediaU
 	if err != nil {
 		return Media{}, err
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; TelegramRecipeBot/1.0)")
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+	req.Header.Set("Referer", "https://www.instagram.com/")
 	res, err := client.Do(req)
 	if err != nil {
-		return Media{}, &UnsupportedError{Message: "Instagram media could not be downloaded. The public link may be expired or rate-limited."}
+		if ctx.Err() != nil {
+			return Media{}, ctx.Err()
+		}
+		return Media{}, &UnsupportedError{Message: "Instagram media could not be downloaded. The public link may be expired or rate-limited.", Reason: "transport"}
 	}
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return Media{}, &UnsupportedError{Message: "Instagram media could not be downloaded. The public link may require login or be rate-limited."}
+		return Media{}, &UnsupportedError{Message: "Instagram media could not be downloaded. The public link may require login or be rate-limited.", Reason: "http_status", HTTPStatus: res.StatusCode}
 	}
 	prefix := make([]byte, 512)
 	n, readErr := io.ReadFull(res.Body, prefix)
@@ -186,13 +259,13 @@ func (d Downloader) downloadOne(ctx context.Context, client *http.Client, mediaU
 	case "video/mp4":
 		kind, extension, perFileLimit = Video, ".mp4", videoLimit
 	default:
-		return Media{}, &UnsupportedError{Message: "Instagram returned a media format that Telegram cannot upload as a photo or video."}
+		return Media{}, &UnsupportedError{Message: "Instagram returned a media format that Telegram cannot upload as a photo or video.", Stage: "media_validation", Reason: "unsupported_format"}
 	}
 	if remaining < perFileLimit {
 		perFileLimit = remaining
 	}
 	if perFileLimit <= 0 {
-		return Media{}, &UnsupportedError{Message: "That Instagram post exceeds the configured temporary download limit."}
+		return Media{}, &UnsupportedError{Message: "That Instagram post exceeds the configured temporary download limit.", Stage: "media_validation", Reason: "byte_limit"}
 	}
 	path := filepath.Join(dir, fmt.Sprintf("%03d%s", index, extension))
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
@@ -212,7 +285,7 @@ func (d Downloader) downloadOne(ctx context.Context, client *http.Client, mediaU
 		if kind == Video {
 			label = "video"
 		}
-		return Media{}, &UnsupportedError{Message: "An Instagram " + label + " exceeds Telegram's hosted Bot API upload limit."}
+		return Media{}, &UnsupportedError{Message: "An Instagram " + label + " exceeds Telegram's hosted Bot API upload limit.", Stage: "media_validation", Reason: "file_limit"}
 	}
 	return Media{Path: path, Kind: kind, Size: written}, nil
 }
@@ -230,16 +303,36 @@ func (d Downloader) allowed(u *url.URL) bool {
 
 func resolveWithGalleryDL(ctx context.Context, target string, maxItems int) ([]string, error) {
 	args := []string{"--ignore-config", "-o", "extractor.instagram.videos=merged", "--http-timeout", "20", "--retries", "2", "--range", "1-" + strconv.Itoa(maxItems+1), "-g", target}
-	cmd := exec.CommandContext(ctx, "gallery-dl", args...)
+	return resolveCommand(ctx, "gallery-dl", args, maxItems)
+}
+
+func resolveWithYTDLP(ctx context.Context, target string, maxItems int) ([]string, error) {
+	args := []string{"--ignore-config", "--no-cache-dir", "--no-warnings", "--no-playlist", "--socket-timeout", "20", "--retries", "2", "--extractor-retries", "1", "--playlist-end", strconv.Itoa(maxItems + 1), "--format", "best[ext=mp4][protocol=https]/best[protocol=https]", "--get-url", "--", target}
+	return resolveCommand(ctx, "yt-dlp", args, maxItems)
+}
+
+func resolveCommand(ctx context.Context, tool string, args []string, maxItems int) ([]string, error) {
+	cmd := exec.CommandContext(ctx, tool, args...)
 	var stdout bytes.Buffer
+	stderr := &diagnosticBuffer{Limit: 64 * 1024}
 	cmd.Stdout = &limitedWriter{Writer: &stdout, Remaining: 1 << 20}
-	cmd.Stderr = io.Discard
+	cmd.Stderr = stderr
 	if err := cmd.Run(); err != nil {
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return nil, context.DeadlineExceeded
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
 		}
-		return nil, &UnsupportedError{Message: "Instagram could not expose this post anonymously. It may be private, login-gated, removed, or rate-limited."}
+		reason, code := "extractor_failed", -1
+		if errors.Is(err, exec.ErrNotFound) {
+			reason = "extractor_missing"
+		}
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			code = exit.ExitCode()
+			reason = extractorFailureReason(stderr.String())
+		}
+		return nil, &UnsupportedError{Message: "Instagram could not expose this post anonymously. It may be private, login-gated, removed, or rate-limited.", Stage: "resolve", Reason: reason, ExitCode: code}
 	}
+
 	var urls []string
 	scanner := bufio.NewScanner(bytes.NewReader(stdout.Bytes()))
 	scanner.Buffer(make([]byte, 4096), 128*1024)
@@ -253,7 +346,7 @@ func resolveWithGalleryDL(ctx context.Context, target string, maxItems int) ([]s
 		return nil, errors.New("parse Instagram extractor output")
 	}
 	if len(urls) > maxItems {
-		return nil, &UnsupportedError{Message: fmt.Sprintf("That Instagram post has more than the supported %d media items.", maxItems)}
+		return nil, &UnsupportedError{Message: fmt.Sprintf("That Instagram post has more than the supported %d media items.", maxItems), Reason: "item_limit"}
 	}
 	return urls, nil
 }
@@ -270,4 +363,41 @@ func (w *limitedWriter) Write(p []byte) (int, error) {
 	n, err := w.Writer.Write(p)
 	w.Remaining -= int64(n)
 	return n, err
+}
+
+// Raw stderr remains bounded in memory and is classified, never returned or logged.
+type diagnosticBuffer struct {
+	bytes.Buffer
+	Limit int
+}
+
+func (b *diagnosticBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	if remaining := b.Limit - b.Len(); remaining > 0 {
+		if len(p) > remaining {
+			p = p[:remaining]
+		}
+		_, _ = b.Buffer.Write(p)
+	}
+	return n, nil
+}
+
+func extractorFailureReason(stderr string) string {
+	text := strings.ToLower(stderr)
+	switch {
+	case strings.Contains(text, "429"), strings.Contains(text, "too many requests"), strings.Contains(text, "rate limit"):
+		return "rate_limited"
+	case strings.Contains(text, "403"), strings.Contains(text, "forbidden"):
+		return "forbidden"
+	case strings.Contains(text, "login"), strings.Contains(text, "log in"), strings.Contains(text, "authentication"), strings.Contains(text, "cookies"):
+		return "login_required"
+	case strings.Contains(text, "404"), strings.Contains(text, "not found"), strings.Contains(text, "unavailable"):
+		return "unavailable"
+	case strings.Contains(text, "timed out"), strings.Contains(text, "timeout"):
+		return "network_timeout"
+	case strings.Contains(text, "unsupported url"):
+		return "unsupported_url"
+	default:
+		return "extractor_failed"
+	}
 }

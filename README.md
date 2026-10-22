@@ -61,7 +61,7 @@ text-only conversational assistant.
 Telegram long poll -> sender allowlist -> interaction policy -> bounded queue
   recipe -> exact YouTube URL policy -> yt-dlp -> bounded evidence -> GLM JSON
   chat   -> per-chat/topic 20-message memory -> GLM plain text
-  media  -> exact Instagram post/Reel policy -> gallery-dl URL discovery
+  media  -> exact Instagram policy -> yt-dlp (Reels) / gallery-dl (posts) URL discovery
          -> bounded anonymous CDN downloads -> Telegram photo/video/albums
   all jobs -> timeouts, anonymous diagnostics, unconditional temp cleanup
 ```
@@ -69,6 +69,8 @@ Telegram long poll -> sender allowlist -> interaction policy -> bounded queue
 Recipe acknowledgements are edited through seven emoji-labelled stages covering
 download, captions, creator comments, frame sampling, OCR, GLM reconstruction,
 and Rich Message formatting. Instagram jobs show bounded download/upload status.
+Reels use yt-dlp’s anonymous video extraction path; post/carousel extraction
+continues through gallery-dl.
 
 ## Local development
 

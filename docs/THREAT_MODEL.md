@@ -21,8 +21,10 @@ GitHub/GHCR holds code and images, never runtime secrets.
   `cdninstagram.com` and `fbcdn.net`, including redirects. URL credentials,
   lookalikes, profiles, arbitrary redirects, and non-HTTP(S) schemes are rejected.
 - Subprocesses: argument arrays only, never a shell. `gallery-dl` ignores user
-  configuration, uses no cookies, emits bounded URL-only stdout, and discards
-  stderr so signed URLs cannot reach application logs.
+  configuration, uses no cookies, and emits bounded URL-only stdout. Reels use
+  yt-dlp with config/cache disabled.
+  Both extractors retain at most 64 KiB stderr in memory for fixed-code
+  classification; raw stderr and signed URLs never reach application logs.
 - Prompt injection: recipe evidence is explicitly untrusted and constrained by a
   fixed structured prompt. Conversation history is bounded and cannot alter
   application configuration or invoke tools.

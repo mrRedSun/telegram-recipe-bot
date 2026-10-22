@@ -41,6 +41,10 @@ type InstagramDownloader interface {
 	Download(context.Context, string, string) ([]instagram.Media, error)
 }
 
+type diagnosticInstagramDownloader interface {
+	DownloadWithDiagnostics(context.Context, string, string, func(instagram.Diagnostic)) ([]instagram.Media, error)
+}
+
 type Inferer interface {
 	Infer(context.Context, youtube.Evidence) (recipe.Recipe, error)
 	Converse(context.Context, []conversation.Message) (string, error)
@@ -511,7 +515,19 @@ func (a *App) processInstagram(parent context.Context, item *job) {
 		}
 	}()
 	_ = a.tg.Edit(parent, item.chatID, item.statusID, "⬇️ <b>Downloading Instagram media…</b>")
-	items, err := a.instagram.Download(ctx, item.request, dir)
+	var items []instagram.Media
+	var err error
+	if downloader, ok := a.instagram.(diagnosticInstagramDownloader); ok {
+		items, err = downloader.DownloadWithDiagnostics(ctx, item.request, dir, func(event instagram.Diagnostic) {
+			level := slog.LevelInfo
+			if event.Outcome == "failed" {
+				level = slog.LevelWarn
+			}
+			slog.Log(ctx, level, "Instagram job progressed", "job", item.id, "stage", event.Stage, "backend", event.Backend, "outcome", event.Outcome, "reason", event.Reason, "exit_code", event.ExitCode, "http_status", event.HTTPStatus, "item", event.Item, "items", event.Items, "bytes", event.Bytes, "elapsed_ms", event.ElapsedMS)
+		})
+	} else {
+		items, err = a.instagram.Download(ctx, item.request, dir)
+	}
 	if err != nil {
 		a.failInstagram(parent, item, err)
 		return
@@ -523,8 +539,10 @@ func (a *App) processInstagram(parent context.Context, item *job) {
 		media = append(media, telegram.Media{Type: string(downloaded.Kind), Path: downloaded.Path})
 	}
 	_ = a.tg.Edit(parent, item.chatID, item.statusID, fmt.Sprintf("⬆️ <b>Uploading %d Instagram item(s)…</b>", len(media)))
+	uploadStarted := time.Now()
+	slog.Info("Instagram upload started", "job", item.id, "items", len(media), "bytes", total)
 	if err := a.tg.SendMedia(ctx, item.chatID, item.threadID, media); err != nil {
-		slog.Warn("Instagram delivery failed", "job", item.id, "reason", "telegram_upload")
+		slog.Warn("Instagram delivery failed", "job", item.id, "stage", "upload", "reason", "telegram_upload", "items", len(media), "bytes", total, "elapsed_ms", time.Since(uploadStarted).Milliseconds())
 		_ = a.tg.Edit(parent, item.chatID, item.statusID, "⚠️ <b>Telegram upload failed</b> — the temporary files were removed. Please retry once.")
 		return
 	}
@@ -542,6 +560,9 @@ func (a *App) failInstagram(ctx context.Context, item *job, err error) {
 	var unsupported *instagram.UnsupportedError
 	if errors.As(err, &unsupported) {
 		reason = "unsupported"
+		if unsupported.Reason != "" {
+			reason = unsupported.Reason
+		}
 		message = "🚫 <b>Instagram media unavailable</b> — " + html.EscapeString(unsupported.Message)
 	}
 	slog.Warn("Instagram job failed", "job", item.id, "reason", reason)
