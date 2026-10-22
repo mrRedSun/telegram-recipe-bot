@@ -13,9 +13,8 @@ import (
 	"github.com/mrRedSun/telegram-recipe-bot/internal/app"
 	"github.com/mrRedSun/telegram-recipe-bot/internal/config"
 	"github.com/mrRedSun/telegram-recipe-bot/internal/glm"
-	"github.com/mrRedSun/telegram-recipe-bot/internal/instagram"
+	"github.com/mrRedSun/telegram-recipe-bot/internal/source"
 	"github.com/mrRedSun/telegram-recipe-bot/internal/telegram"
-	"github.com/mrRedSun/telegram-recipe-bot/internal/youtube"
 )
 
 func main() {
@@ -27,14 +26,13 @@ func main() {
 		os.Exit(1)
 	}
 	tg := telegram.New(cfg.TelegramAPIBase, cfg.TelegramToken)
-	extract := youtube.Extractor{MaxDuration: cfg.MaxDuration, MaxBytes: cfg.MaxDownloadBytes, TesseractLangs: cfg.TesseractLangs}
-	instagramDownloader := instagram.Downloader{MaxBytes: cfg.MaxDownloadBytes, MaxItems: 20}
+	extract := source.Extractor{MaxDuration: cfg.MaxDuration, MaxBytes: cfg.MaxDownloadBytes, TesseractLangs: cfg.TesseractLangs}
 	ai := glm.New(cfg.GLMAPIBase, cfg.GLMAPIKey, cfg.GLMModel, cfg.ReasoningEffort, cfg.GLMVision)
 	a := app.New(app.Config{
 		Allowed: cfg.AllowedUsers, Workers: cfg.Workers, QueueSize: cfg.QueueSize,
 		TempRoot: cfg.TempRoot, JobTimeout: cfg.JobTimeout,
 		ConversationMessages: 20, ConversationScopes: 256, ConversationMessageRunes: 4000,
-	}, tg, extract, instagramDownloader, ai)
+	}, tg, extract, ai)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 	mux := http.NewServeMux()

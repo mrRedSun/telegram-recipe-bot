@@ -15,8 +15,8 @@ import (
 	"time"
 
 	"github.com/mrRedSun/telegram-recipe-bot/internal/conversation"
-	"github.com/mrRedSun/telegram-recipe-bot/internal/instagram"
 	"github.com/mrRedSun/telegram-recipe-bot/internal/recipe"
+	"github.com/mrRedSun/telegram-recipe-bot/internal/source"
 	"github.com/mrRedSun/telegram-recipe-bot/internal/telegram"
 	"github.com/mrRedSun/telegram-recipe-bot/internal/youtube"
 )
@@ -26,7 +26,6 @@ type Messenger interface {
 	Updates(context.Context, int64) ([]telegram.Update, error)
 	Send(context.Context, int64, int64, string) (telegram.Message, error)
 	Edit(context.Context, int64, int64, string) error
-	SendMedia(context.Context, int64, int64, []telegram.Media) error
 }
 
 type Extractor interface {
@@ -37,12 +36,8 @@ type progressExtractor interface {
 	ExtractWithProgress(context.Context, string, string, func(string)) (youtube.Evidence, error)
 }
 
-type InstagramDownloader interface {
-	Download(context.Context, string, string) ([]instagram.Media, error)
-}
-
-type diagnosticInstagramDownloader interface {
-	DownloadWithDiagnostics(context.Context, string, string, func(instagram.Diagnostic)) ([]instagram.Media, error)
+type diagnosticExtractor interface {
+	ExtractWithDiagnostics(context.Context, string, string, func(string), func(source.Diagnostic)) (youtube.Evidence, error)
 }
 
 type Inferer interface {
@@ -65,7 +60,6 @@ type jobKind string
 const (
 	recipeJob       jobKind = "recipe"
 	conversationJob jobKind = "conversation"
-	instagramJob    jobKind = "instagram"
 )
 
 type job struct {
@@ -84,7 +78,6 @@ type App struct {
 	cfg              Config
 	tg               Messenger
 	extract          Extractor
-	instagram        InstagramDownloader
 	infer            Inferer
 	conversations    *conversation.Store
 	jobs             chan *job
@@ -97,12 +90,11 @@ type App struct {
 	bot              telegram.User
 }
 
-func New(cfg Config, tg Messenger, extract Extractor, instagramDownloader InstagramDownloader, infer Inferer) *App {
+func New(cfg Config, tg Messenger, extract Extractor, infer Inferer) *App {
 	return &App{
 		cfg:              cfg,
 		tg:               tg,
 		extract:          extract,
-		instagram:        instagramDownloader,
 		infer:            infer,
 		conversations:    conversation.NewStore(cfg.ConversationMessages, cfg.ConversationScopes, cfg.ConversationMessageRunes),
 		jobs:             make(chan *job, cfg.QueueSize),
@@ -165,10 +157,10 @@ func (a *App) handle(ctx context.Context, update telegram.Update) {
 	key := conversation.Key{ChatID: message.Chat.ID, ThreadID: message.MessageThreadID}
 	switch command {
 	case "/start", "/help":
-		_, _ = a.tg.Send(ctx, message.Chat.ID, message.MessageThreadID, "Send a YouTube URL for recipe extraction or a public Instagram post/Reel URL for its media. You can also chat with me directly. In groups, use <code>/recipe URL</code>, <code>/ask question</code>, mention me, or reply to me.\n\n/reset — clear this chat/topic’s temporary context\n/privacy — data handling\n/status — service status")
+		_, _ = a.tg.Send(ctx, message.Chat.ID, message.MessageThreadID, "Send a YouTube video/Short or public Instagram Reel URL to get a recipe. You can also chat with me directly. In groups, use <code>/recipe URL</code>, <code>/ask question</code>, mention me, or reply to me.\n\n/reset — clear this chat/topic’s temporary context\n/privacy — data handling\n/status — service status")
 		return
 	case "/privacy":
-		_, _ = a.tg.Send(ctx, message.Chat.ID, message.MessageThreadID, "Conversation context is kept only in memory, separately per DM, group, or forum topic, and is limited to the latest 20 messages. <code>/reset</code> clears it and a restart removes it. URLs, messages, context, source media, and identities are not logged. Instagram and recipe files use temporary storage and are removed after each job. Telegram, Instagram, YouTube, and Z.AI still process data under their own policies.")
+		_, _ = a.tg.Send(ctx, message.Chat.ID, message.MessageThreadID, "Conversation context is kept only in memory, separately per DM, group, or forum topic, and is limited to the latest 20 messages. <code>/reset</code> clears it and a restart removes it. URLs, messages, context, source media, and identities are not logged. Source video and recipe files use temporary storage and are removed after each job. Telegram, Instagram, YouTube, and Z.AI still process data under their own policies.")
 		return
 	case "/status":
 		_, _ = a.tg.Send(ctx, message.Chat.ID, message.MessageThreadID, "Recipe bot and assistant are ready.")
@@ -182,7 +174,7 @@ func (a *App) handle(ctx context.Context, update telegram.Update) {
 		return
 	}
 
-	if url, err := youtube.Normalize(text); err == nil {
+	if url, err := source.Normalize(text); err == nil {
 		a.queue(ctx, message, recipeJob, url, "🕐 <b>Queued</b> — waiting for a recipe worker…")
 		return
 	}
@@ -209,20 +201,20 @@ func (a *App) handle(ctx context.Context, update telegram.Update) {
 	}
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
-		_, _ = a.tg.Send(ctx, message.Chat.ID, message.MessageThreadID, "Please include a question or a public Instagram post/Reel URL.")
+		_, _ = a.tg.Send(ctx, message.Chat.ID, message.MessageThreadID, "Please include a question or a YouTube video/Short or Instagram Reel URL.")
 		return
 	}
-	if instagramURL, ok := instagram.Find(prompt); ok {
-		a.queue(ctx, message, instagramJob, instagramURL, "🕐 <b>Queued</b> — waiting to fetch Instagram media…")
+	if recipeURL, ok := source.Find(prompt); ok {
+		a.queue(ctx, message, recipeJob, recipeURL, "🕐 <b>Queued</b> — waiting for a recipe worker…")
 		return
 	}
 	a.queue(ctx, message, conversationJob, prompt, "🧠 <b>Thinking…</b>")
 }
 
 func (a *App) queueRecipe(ctx context.Context, message *telegram.Message, raw string) {
-	url, err := youtube.Normalize(raw)
+	url, err := source.Normalize(raw)
 	if err != nil {
-		_, _ = a.tg.Send(ctx, message.Chat.ID, message.MessageThreadID, "❌ Please send one valid youtube.com or youtu.be video URL after <code>/recipe</code>.")
+		_, _ = a.tg.Send(ctx, message.Chat.ID, message.MessageThreadID, "❌ Please send one valid YouTube video/Short or Instagram Reel URL after <code>/recipe</code>.")
 		return
 	}
 	a.queue(ctx, message, recipeJob, url, "🕐 <b>Queued</b> — waiting for a recipe worker…")
@@ -324,8 +316,6 @@ func (a *App) worker(ctx context.Context) {
 				a.processRecipe(ctx, item)
 			case conversationJob:
 				processed = a.processConversation(ctx, item)
-			case instagramJob:
-				a.processInstagram(ctx, item)
 			}
 			if !processed {
 				a.wg.Add(1)
@@ -500,82 +490,13 @@ func assistantFailureMessage(err error) string {
 	}
 }
 
-func (a *App) processInstagram(parent context.Context, item *job) {
-	ctx, cancel := context.WithTimeout(parent, a.cfg.JobTimeout)
-	defer cancel()
-	started := time.Now()
-	dir := filepath.Join(a.cfg.TempRoot, fmt.Sprintf("job-%d", item.id))
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		a.failInstagram(parent, item, err)
-		return
-	}
-	defer func() {
-		if err := os.RemoveAll(dir); err != nil {
-			slog.Warn("temporary job cleanup failed", "job", item.id, "kind", item.kind, "error", err)
-		}
-	}()
-	_ = a.tg.Edit(parent, item.chatID, item.statusID, "⬇️ <b>Downloading Instagram media…</b>")
-	var items []instagram.Media
-	var err error
-	if downloader, ok := a.instagram.(diagnosticInstagramDownloader); ok {
-		items, err = downloader.DownloadWithDiagnostics(ctx, item.request, dir, func(event instagram.Diagnostic) {
-			level := slog.LevelInfo
-			if event.Outcome == "failed" {
-				level = slog.LevelWarn
-			}
-			slog.Log(ctx, level, "Instagram job progressed", "job", item.id, "stage", event.Stage, "backend", event.Backend, "outcome", event.Outcome, "reason", event.Reason, "exit_code", event.ExitCode, "http_status", event.HTTPStatus, "item", event.Item, "items", event.Items, "bytes", event.Bytes, "elapsed_ms", event.ElapsedMS)
-		})
-	} else {
-		items, err = a.instagram.Download(ctx, item.request, dir)
-	}
-	if err != nil {
-		a.failInstagram(parent, item, err)
-		return
-	}
-	var total int64
-	media := make([]telegram.Media, 0, len(items))
-	for _, downloaded := range items {
-		total += downloaded.Size
-		media = append(media, telegram.Media{Type: string(downloaded.Kind), Path: downloaded.Path})
-	}
-	_ = a.tg.Edit(parent, item.chatID, item.statusID, fmt.Sprintf("⬆️ <b>Uploading %d Instagram item(s)…</b>", len(media)))
-	uploadStarted := time.Now()
-	slog.Info("Instagram upload started", "job", item.id, "items", len(media), "bytes", total)
-	if err := a.tg.SendMedia(ctx, item.chatID, item.threadID, media); err != nil {
-		slog.Warn("Instagram delivery failed", "job", item.id, "stage", "upload", "reason", "telegram_upload", "items", len(media), "bytes", total, "elapsed_ms", time.Since(uploadStarted).Milliseconds())
-		_ = a.tg.Edit(parent, item.chatID, item.statusID, "⚠️ <b>Telegram upload failed</b> — the temporary files were removed. Please retry once.")
-		return
-	}
-	_ = a.tg.Edit(parent, item.chatID, item.statusID, fmt.Sprintf("✅ <b>Sent %d Instagram item(s)</b>", len(media)))
-	slog.Info("Instagram media delivered", "job", item.id, "items", len(media), "bytes", total, "elapsed_ms", time.Since(started).Milliseconds())
-}
-
-func (a *App) failInstagram(ctx context.Context, item *job, err error) {
-	reason := "unavailable"
-	message := "⚠️ <b>Instagram download failed</b> — the public post may be unavailable, login-gated, removed, or rate-limited."
-	if errors.Is(err, context.DeadlineExceeded) {
-		reason = "timeout"
-		message = "⏱️ <b>Instagram download timed out</b> — please retry once."
-	}
-	var unsupported *instagram.UnsupportedError
-	if errors.As(err, &unsupported) {
-		reason = "unsupported"
-		if unsupported.Reason != "" {
-			reason = unsupported.Reason
-		}
-		message = "🚫 <b>Instagram media unavailable</b> — " + html.EscapeString(unsupported.Message)
-	}
-	slog.Warn("Instagram job failed", "job", item.id, "reason", reason)
-	_ = a.tg.Edit(ctx, item.chatID, item.statusID, message)
-}
-
 func (a *App) processRecipe(parent context.Context, item *job) {
 	ctx, cancel := context.WithTimeout(parent, a.cfg.JobTimeout)
 	defer cancel()
 	started := time.Now()
 	dir := filepath.Join(a.cfg.TempRoot, fmt.Sprintf("job-%d", item.id))
 	slog.Info("recipe job started", "job", item.id)
-	a.progress(parent, item, "download", "⬇️ <b>Step 1/7 — Downloading video</b>\nFetching the Short and its metadata…")
+	a.progress(parent, item, "download", "⬇️ <b>Step 1/7 — Downloading video</b>\nFetching the source video and its caption/metadata…")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		a.failRecipe(parent, item, "workspace", err)
 		return
@@ -588,12 +509,21 @@ func (a *App) processRecipe(parent context.Context, item *job) {
 	extractStarted := time.Now()
 	var evidence youtube.Evidence
 	var err error
-	if extractor, ok := a.extract.(progressExtractor); ok {
-		evidence, err = extractor.ExtractWithProgress(ctx, item.request, dir, func(stage string) {
-			if message := extractionProgressMessage(stage); message != "" {
-				a.progress(parent, item, stage, message)
+	progress := func(stage string) {
+		if message := extractionProgressMessage(stage); message != "" {
+			a.progress(parent, item, stage, message)
+		}
+	}
+	if extractor, ok := a.extract.(diagnosticExtractor); ok {
+		evidence, err = extractor.ExtractWithDiagnostics(ctx, item.request, dir, progress, func(event source.Diagnostic) {
+			level := slog.LevelInfo
+			if event.Outcome == "failed" {
+				level = slog.LevelWarn
 			}
+			slog.Log(ctx, level, "recipe source progressed", "job", item.id, "source", event.Source, "stage", event.Stage, "backend", event.Backend, "outcome", event.Outcome, "reason", event.Reason, "exit_code", event.ExitCode, "http_status", event.HTTPStatus, "items", event.Items, "bytes", event.Bytes, "elapsed_ms", event.ElapsedMS)
 		})
+	} else if extractor, ok := a.extract.(progressExtractor); ok {
+		evidence, err = extractor.ExtractWithProgress(ctx, item.request, dir, progress)
 	} else {
 		evidence, err = a.extract.Extract(ctx, item.request, dir)
 	}
@@ -606,7 +536,7 @@ func (a *App) processRecipe(parent context.Context, item *job) {
 		"duration_seconds", int(evidence.Duration), "frames", len(evidence.Frames),
 		"description_bytes", len(evidence.Description), "author_comment_bytes", len(evidence.AuthorComments),
 		"transcript_bytes", len(evidence.Transcript), "ocr_bytes", len(evidence.OCR))
-	a.progress(parent, item, "inference", "🧠 <b>Step 6/7 — Reconstructing recipe</b>\nGLM-5.3 is comparing the collected evidence…")
+	a.progress(parent, item, "inference", "🧠 <b>Step 6/7 — Reconstructing recipe</b>\nGLM is comparing the collected evidence…")
 	inferStarted := time.Now()
 	result, err := a.infer.Infer(ctx, evidence)
 	if err != nil {
@@ -662,8 +592,8 @@ func failureReason(err error) string {
 		return "provider_incomplete_json"
 	case strings.Contains(text, "recipe validation"):
 		return "provider_invalid_recipe"
-	case strings.Contains(text, "yt-dlp failed"):
-		return "youtube_download"
+	case strings.Contains(text, "source command failed (metadata"), strings.Contains(text, "source command failed (download"), strings.Contains(text, "yt-dlp failed"):
+		return "source_download"
 	case strings.Contains(text, "frame extraction failed") || strings.Contains(text, "video yielded no frames"):
 		return "frame_extraction"
 	default:
@@ -678,15 +608,15 @@ func failureMessage(stage string, err error) string {
 	}
 	switch failureReason(err) {
 	case "timeout":
-		return "⏱️ <b>Timed out during " + html.EscapeString(stage) + "</b> — the Short or model took longer than the five-minute job limit. Please retry once."
+		return "⏱️ <b>Timed out during " + html.EscapeString(stage) + "</b> — the video or model took longer than the five-minute job limit. Please retry once."
 	case "provider_quota":
 		return "💳 <b>GLM quota unavailable</b> — Z.AI rejected the inference request. Check the configured plan endpoint and quota, then retry."
 	case "provider_incomplete_json":
-		return "🧠 <b>GLM response was incomplete</b> — the model stopped before finishing the recipe JSON. Retry the same Short; the event is logged with safe token diagnostics."
+		return "🧠 <b>GLM response was incomplete</b> — the model stopped before finishing the recipe JSON. Retry the same video; the event is logged with safe token diagnostics."
 	case "provider_invalid_recipe":
 		return "🧩 <b>GLM returned an invalid recipe</b> — required ingredients or steps were missing from its structured response. Please retry."
-	case "youtube_download":
-		return "📹 <b>YouTube download failed</b> — the video may be private, age/region restricted, removed, or temporarily blocked by YouTube."
+	case "source_download":
+		return "📹 <b>Video download failed</b> — the source may be private, login-gated, removed, or temporarily unavailable."
 	case "frame_extraction":
 		return "🖼️ <b>Frame extraction failed</b> — the video downloaded, but no usable visual frames could be decoded."
 	default:

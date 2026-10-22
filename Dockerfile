@@ -5,8 +5,7 @@ COPY go.mod ./
 COPY cmd ./cmd
 COPY internal ./internal
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/recipebot ./cmd/recipebot \
-    && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/recipeprobe ./cmd/recipeprobe \
-    && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/instagramprobe ./cmd/instagramprobe
+    && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/recipeprobe ./cmd/recipeprobe
 
 FROM python:3.13.17-alpine3.23@sha256:a183eaab9bc16fc01807204df7ed80291550a525662753ad166da45a078db18f AS runtime
 COPY requirements-extractors.txt /tmp/requirements-extractors.txt
@@ -25,7 +24,6 @@ RUN apk add --no-cache \
     && chown recipebot:recipebot /tmp/recipebot
 COPY --from=build --chown=10001:10001 /out/recipebot /usr/local/bin/recipebot
 COPY --from=build --chown=10001:10001 /out/recipeprobe /usr/local/bin/recipeprobe
-COPY --from=build --chown=10001:10001 /out/instagramprobe /usr/local/bin/instagramprobe
 ENV PATH="/opt/venv/bin:$PATH"
 USER 10001:10001
 EXPOSE 8080

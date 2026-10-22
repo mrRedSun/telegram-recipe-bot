@@ -7,11 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"mime/multipart"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -43,11 +40,6 @@ type Update struct {
 	Message  *Message `json:"message"`
 }
 
-type Media struct {
-	Type string
-	Path string
-}
-
 type response[T any] struct {
 	OK          bool   `json:"ok"`
 	Result      T      `json:"result"`
@@ -55,18 +47,16 @@ type response[T any] struct {
 }
 
 type Client struct {
-	base   string
-	token  string
-	http   *http.Client
-	upload *http.Client
+	base  string
+	token string
+	http  *http.Client
 }
 
 func New(base, token string) *Client {
 	return &Client{
-		base:   strings.TrimRight(base, "/"),
-		token:  token,
-		http:   &http.Client{Timeout: 65 * time.Second},
-		upload: &http.Client{Timeout: 180 * time.Second},
+		base:  strings.TrimRight(base, "/"),
+		token: token,
+		http:  &http.Client{Timeout: 65 * time.Second},
 	}
 }
 
@@ -127,105 +117,6 @@ func (c *Client) Send(ctx context.Context, chatID, threadID int64, text string) 
 func (c *Client) Edit(ctx context.Context, chatID, messageID int64, text string) error {
 	_, err := c.message(ctx, "editMessageText", map[string]any{"chat_id": chatID, "message_id": messageID, "rich_message": map[string]any{"html": text, "skip_entity_detection": true}})
 	return err
-}
-
-func (c *Client) SendMedia(ctx context.Context, chatID, threadID int64, media []Media) error {
-	for start := 0; start < len(media); start += 10 {
-		end := start + 10
-		if end > len(media) {
-			end = len(media)
-		}
-		chunk := media[start:end]
-		if len(chunk) == 1 {
-			method, field := "sendPhoto", "photo"
-			if chunk[0].Type == "video" {
-				method, field = "sendVideo", "video"
-			}
-			if err := c.multipart(ctx, method, chatID, threadID, nil, []uploadFile{{Field: field, Path: chunk[0].Path}}); err != nil {
-				return err
-			}
-			continue
-		}
-		items := make([]map[string]string, 0, len(chunk))
-		files := make([]uploadFile, 0, len(chunk))
-		for index, item := range chunk {
-			field := fmt.Sprintf("media%d", index)
-			items = append(items, map[string]string{"type": item.Type, "media": "attach://" + field})
-			files = append(files, uploadFile{Field: field, Path: item.Path})
-		}
-		encoded, err := json.Marshal(items)
-		if err != nil {
-			return err
-		}
-		if err := c.multipart(ctx, "sendMediaGroup", chatID, threadID, map[string]string{"media": string(encoded)}, files); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-type uploadFile struct {
-	Field string
-	Path  string
-}
-
-func (c *Client) multipart(ctx context.Context, method string, chatID, threadID int64, fields map[string]string, files []uploadFile) error {
-	reader, writer := io.Pipe()
-	defer reader.Close()
-	form := multipart.NewWriter(writer)
-	go func() {
-		writeErr := form.WriteField("chat_id", strconv.FormatInt(chatID, 10))
-		if writeErr == nil && threadID != 0 {
-			writeErr = form.WriteField("message_thread_id", strconv.FormatInt(threadID, 10))
-		}
-		for key, value := range fields {
-			if writeErr == nil {
-				writeErr = form.WriteField(key, value)
-			}
-		}
-		for _, file := range files {
-			if writeErr != nil {
-				break
-			}
-			input, err := os.Open(file.Path)
-			if err != nil {
-				writeErr = err
-				break
-			}
-			part, err := form.CreateFormFile(file.Field, filepath.Base(file.Path))
-			if err == nil {
-				_, err = io.Copy(part, input)
-			}
-			closeErr := input.Close()
-			if err != nil {
-				writeErr = err
-			} else if closeErr != nil {
-				writeErr = closeErr
-			}
-		}
-		if writeErr == nil {
-			writeErr = form.Close()
-		}
-		_ = writer.CloseWithError(writeErr)
-	}()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.method(method), reader)
-	if err != nil {
-		return fmt.Errorf("telegram %s request construction failed", method)
-	}
-	req.Header.Set("Content-Type", form.FormDataContentType())
-	res, err := c.upload.Do(req)
-	if err != nil {
-		return telegramTransportError(ctx, method)
-	}
-	defer res.Body.Close()
-	var out response[json.RawMessage]
-	if err := decode(res, &out); err != nil {
-		return err
-	}
-	if !out.OK {
-		return fmt.Errorf("telegram %s rejected", method)
-	}
-	return nil
 }
 
 func (c *Client) message(ctx context.Context, method string, payload map[string]any) (Message, error) {
