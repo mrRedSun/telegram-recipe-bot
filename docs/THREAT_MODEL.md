@@ -42,3 +42,12 @@ extractors select CDN requests; changes in extractor/network behavior require
 review. Third parties receive data under their own policies. Privileged host
 administrators can inspect runtime credentials. Another token-sharing poller can
 conflict. Hardware/storage failures require the existing external backup policy.
+
+### Optional local recipe catalogue
+
+See [CATALOG.md](CATALOG.md) for data provenance, read-only mounting, configuration,
+query/resource limits, fallback, attribution, and source-quality limits. Catalogue
+text is untrusted reference material. It cannot override explicit video details,
+introduce reference-only ingredients, or establish high-confidence fields. Only
+used sources receive application-bound citations. No Telegram history or source
+URLs are added to the catalogue, and runtime search phrases are never persisted.

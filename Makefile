@@ -1,4 +1,4 @@
-.PHONY: fmt test race vet build image
+.PHONY: fmt test race vet build image catalog-test
 fmt:
 	test -z "$$(gofmt -l .)"
 test:
@@ -12,3 +12,6 @@ build:
 image:
 	docker build -t telegram-recipe-bot:dev .
 
+
+catalog-test:
+	python3 -m unittest discover -s tools/catalog -p "test_*.py"

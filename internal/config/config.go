@@ -6,46 +6,49 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 )
 
 type Config struct {
-	TelegramToken    string
-	TelegramAPIBase  string
-	AllowedUsers     map[int64]struct{}
-	GLMAPIKey        string
-	GLMAPIBase       string
-	GLMModel         string
-	GLMVision        bool
-	ReasoningEffort  string
-	Workers          int
-	QueueSize        int
-	MaxDuration      time.Duration
-	MaxDownloadBytes int64
-	JobTimeout       time.Duration
-	TempRoot         string
-	ListenAddress    string
-	TesseractLangs   string
+	RecipeCatalogPath string
+	TelegramToken     string
+	TelegramAPIBase   string
+	AllowedUsers      map[int64]struct{}
+	GLMAPIKey         string
+	GLMAPIBase        string
+	GLMModel          string
+	GLMVision         bool
+	ReasoningEffort   string
+	Workers           int
+	QueueSize         int
+	MaxDuration       time.Duration
+	MaxDownloadBytes  int64
+	JobTimeout        time.Duration
+	TempRoot          string
+	ListenAddress     string
+	TesseractLangs    string
 }
 
 func Load() (Config, error) {
 	c := Config{
-		TelegramToken:    strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")),
-		TelegramAPIBase:  value("TELEGRAM_API_BASE", "https://api.telegram.org"),
-		GLMAPIKey:        strings.TrimSpace(os.Getenv("GLM_API_KEY")),
-		GLMAPIBase:       strings.TrimRight(value("GLM_API_BASE", "https://api.z.ai/api/paas/v4"), "/"),
-		GLMModel:         value("GLM_MODEL", "glm-5.3-flash"),
-		ReasoningEffort:  value("GLM_REASONING_EFFORT", "high"),
-		Workers:          intValue("WORKERS", 2),
-		QueueSize:        intValue("QUEUE_SIZE", 8),
-		MaxDuration:      time.Duration(intValue("MAX_VIDEO_SECONDS", 240)) * time.Second,
-		MaxDownloadBytes: int64(intValue("MAX_DOWNLOAD_MB", 100)) * 1024 * 1024,
-		JobTimeout:       time.Duration(intValue("JOB_TIMEOUT_SECONDS", 300)) * time.Second,
-		TempRoot:         value("TEMP_ROOT", "/tmp/recipebot"),
-		ListenAddress:    value("LISTEN_ADDRESS", ":8080"),
-		TesseractLangs:   value("TESSERACT_LANGS", "eng"),
+		RecipeCatalogPath: strings.TrimSpace(os.Getenv("RECIPE_CATALOG_PATH")),
+		TelegramToken:     strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")),
+		TelegramAPIBase:   value("TELEGRAM_API_BASE", "https://api.telegram.org"),
+		GLMAPIKey:         strings.TrimSpace(os.Getenv("GLM_API_KEY")),
+		GLMAPIBase:        strings.TrimRight(value("GLM_API_BASE", "https://api.z.ai/api/paas/v4"), "/"),
+		GLMModel:          value("GLM_MODEL", "glm-5.3-flash"),
+		ReasoningEffort:   value("GLM_REASONING_EFFORT", "high"),
+		Workers:           intValue("WORKERS", 2),
+		QueueSize:         intValue("QUEUE_SIZE", 8),
+		MaxDuration:       time.Duration(intValue("MAX_VIDEO_SECONDS", 240)) * time.Second,
+		MaxDownloadBytes:  int64(intValue("MAX_DOWNLOAD_MB", 100)) * 1024 * 1024,
+		JobTimeout:        time.Duration(intValue("JOB_TIMEOUT_SECONDS", 300)) * time.Second,
+		TempRoot:          value("TEMP_ROOT", "/tmp/recipebot"),
+		ListenAddress:     value("LISTEN_ADDRESS", ":8080"),
+		TesseractLangs:    value("TESSERACT_LANGS", "eng"),
 	}
 	c.GLMVision = strings.HasSuffix(strings.ToLower(c.GLMModel), "-flash")
 	if raw := strings.TrimSpace(os.Getenv("GLM_VISION_ENABLED")); raw != "" {
@@ -60,6 +63,9 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	c.AllowedUsers = users
+	if c.RecipeCatalogPath != "" && !filepath.IsAbs(c.RecipeCatalogPath) {
+		return Config{}, errors.New("RECIPE_CATALOG_PATH must be absolute")
+	}
 	if c.TelegramToken == "" {
 		return Config{}, errors.New("TELEGRAM_BOT_TOKEN is required")
 	}

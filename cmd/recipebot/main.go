@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/mrRedSun/telegram-recipe-bot/internal/app"
+	"github.com/mrRedSun/telegram-recipe-bot/internal/catalog"
 	"github.com/mrRedSun/telegram-recipe-bot/internal/config"
 	"github.com/mrRedSun/telegram-recipe-bot/internal/glm"
 	"github.com/mrRedSun/telegram-recipe-bot/internal/source"
@@ -28,6 +29,15 @@ func main() {
 	tg := telegram.New(cfg.TelegramAPIBase, cfg.TelegramToken)
 	extract := source.Extractor{MaxDuration: cfg.MaxDuration, MaxBytes: cfg.MaxDownloadBytes, TesseractLangs: cfg.TesseractLangs}
 	ai := glm.New(cfg.GLMAPIBase, cfg.GLMAPIKey, cfg.GLMModel, cfg.ReasoningEffort, cfg.GLMVision)
+	if cfg.RecipeCatalogPath != "" {
+		store, err := catalog.Open(context.Background(), cfg.RecipeCatalogPath)
+		if err != nil {
+			slog.Error("catalog initialization failed")
+			os.Exit(1)
+		}
+		ai = ai.WithCatalog(store)
+		slog.Info("recipe catalog ready", "records", store.Info.Records)
+	}
 	a := app.New(app.Config{
 		Allowed: cfg.AllowedUsers, Workers: cfg.Workers, QueueSize: cfg.QueueSize,
 		TempRoot: cfg.TempRoot, JobTimeout: cfg.JobTimeout,

@@ -90,3 +90,11 @@ Private/login-gated, DRM, live, story/profile, playlist, image-only, and multi-v
 sources are unsupported. Extraction remains subject to provider rate limits and
 extractor drift. Recipe reconstruction is probabilistic; check uncertain amounts,
 timings, allergens, and food safety.
+
+## Local recipe references
+
+An optional read-only SQLite catalogue can retrieve similar recipes and supply
+labelled reference estimates during video reconstruction. Used references are
+linked in the recipe card; video evidence takes priority. The Food.com importer
+and benchmark run offline on the development machine. See [catalogue setup,
+source-quality limits, and rollback](docs/CATALOG.md).

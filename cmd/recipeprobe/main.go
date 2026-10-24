@@ -9,6 +9,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/mrRedSun/telegram-recipe-bot/internal/catalog"
 	"github.com/mrRedSun/telegram-recipe-bot/internal/config"
 	"github.com/mrRedSun/telegram-recipe-bot/internal/glm"
 	"github.com/mrRedSun/telegram-recipe-bot/internal/source"
@@ -55,11 +56,32 @@ func run() int {
 	slog.Info("probe evidence extracted", "duration_seconds", int(ev.Duration), "frames", len(ev.Frames), "description_bytes", len(ev.Description), "author_comment_bytes", len(ev.AuthorComments), "transcript_bytes", len(ev.Transcript), "ocr_bytes", len(ev.OCR))
 
 	client := glm.New(cfg.GLMAPIBase, cfg.GLMAPIKey, cfg.GLMModel, cfg.ReasoningEffort, cfg.GLMVision)
+	if cfg.RecipeCatalogPath != "" {
+		store, err := catalog.Open(context.Background(), cfg.RecipeCatalogPath)
+		if err != nil {
+			slog.Error("catalog initialization failed")
+			return 1
+		}
+		client = client.WithCatalog(store)
+		slog.Info("recipe catalog ready", "records", store.Info.Records)
+	}
 	r, err := client.Infer(ctx, ev)
 	if err != nil {
 		slog.Error("probe inference failed", "error", err)
 		return 1
 	}
+	estimates := 0
+	for _, ingredient := range r.Ingredients {
+		if len(ingredient.ReferenceIDs) > 0 {
+			estimates++
+		}
+	}
+	for _, step := range r.Steps {
+		if len(step.ReferenceIDs) > 0 {
+			estimates++
+		}
+	}
+	fmt.Printf("catalog_reference_count=%d reference_estimates=%d\n", len(r.References), estimates)
 	fmt.Printf("recipe_validated=true ingredients=%d steps=%d confidence=%s elapsed_ms=%d\n", len(r.Ingredients), len(r.Steps), r.Confidence, time.Since(started).Milliseconds())
 	return 0
 }

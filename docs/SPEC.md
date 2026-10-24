@@ -66,3 +66,12 @@ secret scans, image build, and hardened runtime smoke checks.
 `recipeprobe VIDEO_URL` exercises extraction, GLM inference, and recipe validation
 for either platform without Telegram delivery. It prints only bounded diagnostics
 and recipe counts/confidence, then confirms temporary-workspace cleanup.
+
+### Optional local recipe catalogue
+
+See [CATALOG.md](CATALOG.md) for data provenance, read-only mounting, configuration,
+query/resource limits, fallback, attribution, and source-quality limits. Catalogue
+text is untrusted reference material. It cannot override explicit video details,
+introduce reference-only ingredients, or establish high-confidence fields. Only
+used sources receive application-bound citations. No Telegram history or source
+URLs are added to the catalogue, and runtime search phrases are never persisted.
