@@ -4,3 +4,9 @@ dist/
 coverage.out
 *.test
 
+
+# Local, separately provisioned catalogue data
+.catalogs/
+*.sqlite
+*.sqlite-journal
+__pycache__/

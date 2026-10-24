@@ -56,3 +56,12 @@ upload command or alternate Instagram download workflow.
 
 Keep runtime `.env` mode 0600. Rotate at the provider, update it privately, and
 recreate only when rotation is explicitly authorized. CI needs no runtime secrets.
+
+### Optional local recipe catalogue
+
+See [CATALOG.md](CATALOG.md) for data provenance, read-only mounting, configuration,
+query/resource limits, fallback, attribution, and source-quality limits. Catalogue
+text is untrusted reference material. It cannot override explicit video details,
+introduce reference-only ingredients, or establish high-confidence fields. Only
+used sources receive application-bound citations. No Telegram history or source
+URLs are added to the catalogue, and runtime search phrases are never persisted.

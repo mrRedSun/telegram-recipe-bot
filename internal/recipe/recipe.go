@@ -18,21 +18,24 @@ type Times struct {
 }
 
 type Ingredient struct {
-	Amount      string `json:"amount"`
-	Unit        string `json:"unit"`
-	Item        string `json:"item"`
-	Preparation string `json:"preparation,omitempty"`
-	Confidence  string `json:"confidence"`
+	ReferenceIDs []string `json:"reference_ids,omitempty"`
+	Amount       string   `json:"amount"`
+	Unit         string   `json:"unit"`
+	Item         string   `json:"item"`
+	Preparation  string   `json:"preparation,omitempty"`
+	Confidence   string   `json:"confidence"`
 }
 
 type Step struct {
-	Instruction string `json:"instruction"`
-	Duration    string `json:"duration,omitempty"`
-	Temperature string `json:"temperature,omitempty"`
-	Confidence  string `json:"confidence"`
+	ReferenceIDs []string `json:"reference_ids,omitempty"`
+	Instruction  string   `json:"instruction"`
+	Duration     string   `json:"duration,omitempty"`
+	Temperature  string   `json:"temperature,omitempty"`
+	Confidence   string   `json:"confidence"`
 }
 
 type Recipe struct {
+	References  []Reference  `json:"-"`
 	Title       string       `json:"title"`
 	Summary     string       `json:"summary"`
 	Yield       string       `json:"yield"`
@@ -46,6 +49,9 @@ type Recipe struct {
 }
 
 func (r Recipe) Validate() error {
+	if err := r.validateReferences(); err != nil {
+		return err
+	}
 	if strings.TrimSpace(r.Title) == "" {
 		return errors.New("recipe title is empty")
 	}
@@ -89,10 +95,11 @@ func confidence(v string) bool { return v == "high" || v == "medium" || v == "lo
 // HTML. Tables, headings, lists, details, dividers, and footers are native rich
 // message blocks parsed by editMessageText's rich_message field.
 func RenderRichHTML(r Recipe) string {
+	references := referencesHTML(r.References)
 	var b strings.Builder
 	truncated := false
 	add := func(block string) bool {
-		if b.Len()+len(block) > richMessageBudget {
+		if b.Len()+len(block)+len(references) > richMessageBudget-100 {
 			truncated = true
 			return false
 		}
@@ -105,6 +112,7 @@ func RenderRichHTML(r Recipe) string {
 		return value
 	}
 	finish := func() string {
+		b.WriteString(references)
 		if truncated {
 			b.WriteString("<footer>Recipe shortened to fit Telegram.</footer>")
 		}
@@ -193,6 +201,9 @@ func ingredientTableHTML(ingredients []Ingredient, maxBytes int) (string, bool) 
 		amountHTML, amountCut := escapedField(amount, 80)
 		itemHTML, itemCut := escapedField(ingredient.Item, 220)
 		preparationHTML, preparationCut := escapedField(ingredient.Preparation, 180)
+		if len(ingredient.ReferenceIDs) > 0 {
+			preparationHTML += " <i>(" + referenceEstimateLabel(ingredient.ReferenceIDs) + ")</i>"
+		}
 		shortened = shortened || amountCut || itemCut || preparationCut
 		row := "<tr><td align=\"center\">" + confidenceHTML(ingredient.Confidence) + "</td><td>" + amountHTML + "</td><td>" + itemHTML + "</td><td>" + preparationHTML + "</td></tr>"
 		if b.Len()+len(row)+len(close) > maxBytes {
@@ -260,6 +271,9 @@ func stepsHTML(steps []Step, maxBytes int) (string, bool) {
 		instruction, instructionCut := escapedField(step.Instruction, 520)
 		shortened = shortened || instructionCut
 		var metadata []string
+		if len(step.ReferenceIDs) > 0 {
+			metadata = append(metadata, referenceEstimateLabel(step.ReferenceIDs))
+		}
 		if step.Duration != "" {
 			duration, cut := escapedField(step.Duration, 80)
 			shortened = shortened || cut

@@ -543,7 +543,7 @@ func (a *App) processRecipe(parent context.Context, item *job) {
 		a.failRecipe(parent, item, "inference", err)
 		return
 	}
-	slog.Info("recipe inference completed", "job", item.id, "elapsed_ms", time.Since(inferStarted).Milliseconds(), "confidence", result.Confidence, "ingredients", len(result.Ingredients), "steps", len(result.Steps))
+	slog.Info("recipe inference completed", "job", item.id, "elapsed_ms", time.Since(inferStarted).Milliseconds(), "confidence", result.Confidence, "ingredients", len(result.Ingredients), "steps", len(result.Steps), "references", len(result.References))
 	a.progress(parent, item, "format", "🧾 <b>Step 7/7 — Formatting</b>\nBuilding the Telegram recipe card…")
 	if err := a.tg.Edit(parent, item.chatID, item.statusID, recipe.RenderRichHTML(result)); err != nil {
 		slog.Warn("deliver recipe failed", "job", item.id, "stage", "delivery", "error", err)

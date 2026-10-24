@@ -24,6 +24,8 @@ jobs:
           cache: false
       - name: Format
         run: test -z "$(gofmt -l .)"
+      - name: Catalogue importer tests
+        run: python3 -m unittest discover -s tools/catalog -p "test_*.py"
       - name: Vet
         run: go vet ./...
       - name: Test
@@ -78,7 +80,7 @@ jobs:
         run: |
           docker load --input "${RUNNER_TEMP}/image.tar"
           docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --entrypoint yt-dlp "${IMAGE_REF}" --version
-          docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --entrypoint /opt/venv/bin/python "${IMAGE_REF}" -c 'import os, importlib.util, requests; assert os.getuid() == 10001; assert importlib.util.find_spec("pip") is None; assert importlib.util.find_spec("ensurepip") is None'
+          docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --entrypoint /opt/venv/bin/python "${IMAGE_REF}" -c 'import os, importlib.util, requests; assert os.getuid() == 10001; assert importlib.util.find_spec("pip") is None; assert importlib.util.find_spec("ensurepip") is None; import sqlite3; sqlite3.connect(":memory:").execute("CREATE VIRTUAL TABLE t USING fts5(title)")'
       - name: Publish scanned image
         if: github.event_name == 'push'
         run: docker push "${IMAGE_REF}"
