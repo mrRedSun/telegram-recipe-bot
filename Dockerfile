@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.19
-FROM golang:1.26.10-alpine3.23@sha256:107301490755aa2ea1b0b43788b6e62cff2faae45a538028b193becc06aaffba AS build
+FROM golang:1.27.0-alpine3.23@sha256:3747dcba41c8b0db3211fda4db61638b980e17ac5bb3c94460a975a9cfe19395 AS build
 WORKDIR /src
 COPY go.mod ./
 COPY cmd ./cmd
