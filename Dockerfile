@@ -7,7 +7,7 @@ COPY internal ./internal
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/recipebot ./cmd/recipebot \
     && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/recipeprobe ./cmd/recipeprobe
 
-FROM python:3.13.17-alpine3.23@sha256:a183eaab9bc16fc01807204df7ed80291550a525662753ad166da45a078db18f AS runtime
+FROM python:3.15.2-alpine3.23@sha256:32f06114a111c2467804d06194c5584f16804a78cfaf427fb1fcbb0b3391d0f1 AS runtime
 COPY requirements-extractors.txt /tmp/requirements-extractors.txt
 RUN apk add --no-cache \
       ca-certificates deno ffmpeg tesseract-ocr \
